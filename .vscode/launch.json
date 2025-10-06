@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Qalqan_DS",
+      "type": "go",
+      "request": "launch",
+      "mode": "debug",
+      "program": "${workspaceFolder}",
+      "buildFlags": "-buildvcs=false",
+      "env": {
+        "CGO_CFLAGS": "-IC:\\olm-mingw\\include",
+        "CGO_LDFLAGS": "-LC:\\olm-mingw\\lib",
+        "PATH": "C:\\msys64\\mingw64\\bin;C:\\olm-mingw\\bin;${env:PATH}",
+        "GOFLAGS": "-buildvcs=false" 
+      },
+      "args": []
+    }
+  ]
+}

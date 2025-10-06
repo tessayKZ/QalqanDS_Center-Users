@@ -1,0 +1,20 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "go build (with Olm)",
+        "type": "shell",
+        "command": "go",
+        "args": ["build", "-v", "-buildvcs=false", "./..."],
+        "options": {
+          "env": {
+            "CGO_CFLAGS": "-IC:\\olm-mingw\\include",
+            "CGO_LDFLAGS": "-LC:\\olm-mingw\\lib",
+            "PATH": "C:\\msys64\\mingw64\\bin;C:\\olm-mingw\\bin;${env:PATH}",
+            "GOFLAGS": "-buildvcs=false"
+          }
+        },
+        "problemMatcher": ["$go"]
+      }
+    ]
+  }  

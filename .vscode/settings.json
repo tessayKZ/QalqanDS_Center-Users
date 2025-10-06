@@ -1,0 +1,7 @@
+{
+  "go.toolsEnvVars": {
+    "CGO_CFLAGS":  "-IC:/olm-mingw/include",
+    "CGO_LDFLAGS": "-LC:/olm-mingw/lib"
+  },
+  "cmake.sourceDirectory": "C:/Users/User/go/Qalqan_DS/vcpkg/ports/binn"
+}
