@@ -3,6 +3,7 @@ package main
 import (
 	"QalqanDS/qalqan"
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -163,17 +164,16 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 
 		isCenter := strings.EqualFold(filepath.Base(filePath), "center.bin")
 
-		var abcHeader [16]byte
-		if !isCenter {
-			if len(fileData) < 16+qalqan.DEFAULT_KEY_LEN {
-				dialog.ShowError(fmt.Errorf("abc.bin: too short"), win)
-				return
-			}
-			copy(abcHeader[:], fileData[:16])
+		// Всегда читаем и сохраняем 16-байтовый заголовок
+		var header [16]byte
+		if len(fileData) < 16+qalqan.DEFAULT_KEY_LEN {
+			dialog.ShowError(fmt.Errorf("%s: too short", filepath.Base(filePath)), win)
+			return
 		}
+		copy(header[:], fileData[:16])
 
 		const (
-			abcHdrLen   = 16
+			headerLen   = 16
 			kikeyLen    = 32
 			circleCount = 100
 			sessPerDir  = 1000
@@ -184,19 +184,17 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 
 		var bodyLen int
 		if isCenter {
-			bodyLen = kikeyLen + circleCount*key32 + users*2*sessPerDir*key32
+			bodyLen = headerLen + kikeyLen + circleCount*key32 + users*2*sessPerDir*key32
 		} else {
-			bodyLen = abcHdrLen + kikeyLen + circleCount*key32 + 2*sessPerDir*key32
+			bodyLen = headerLen + kikeyLen + circleCount*key32 + 2*sessPerDir*key32
 		}
 		total := bodyLen + footerLen + imitLen
 
 		newFile := make([]byte, total)
 		off := 0
 
-		if !isCenter {
-			copy(newFile[off:off+abcHdrLen], abcHeader[:])
-			off += abcHdrLen
-		}
+		copy(newFile[off:off+headerLen], header[:])
+		off += headerLen
 
 		copy(newFile[off:off+kikeyLen], newEncKikey)
 		off += kikeyLen
@@ -211,15 +209,35 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 			off += key32
 		}
 
-		for u := 0; u < users; u++ {
+		firstUser, lastUser := 0, users
+		if !isCenter {
+			lastUser = 1
+		}
+		// users range for center/abc stays the same
+		for u := firstUser; u < lastUser; u++ {
+			// IN keys (pad with zeros up to 1000)
 			for i := 0; i < sessPerDir; i++ {
-				enc32(newFile[off:off+key32], session_keys[u].In[i][:])
+				var src [key32]byte
+				if i < len(session_keys[u].In) {
+					src = session_keys[u].In[i]
+				} // else keep zeros
+				enc32(newFile[off:off+key32], src[:])
 				off += key32
 			}
+			// OUT keys (pad with zeros up to 1000)
 			for i := 0; i < sessPerDir; i++ {
-				enc32(newFile[off:off+key32], session_keys[u].Out[i][:])
+				var src [key32]byte
+				if i < len(session_keys[u].Out) {
+					src = session_keys[u].Out[i]
+				}
+				enc32(newFile[off:off+key32], src[:])
 				off += key32
 			}
+		}
+
+		if off != bodyLen {
+			dialog.ShowError(fmt.Errorf("size mismatch: wrote %d, expected %d", off, bodyLen), win)
+			return
 		}
 
 		f := buildFooter(true)
@@ -234,6 +252,10 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 			dialog.ShowError(err, win)
 			return
 		}
+
+		currentRKey = make([]byte, len(newRKey))
+		copy(currentRKey, newRKey)
+		lastKeyHashHex = hex.EncodeToString(newKey32[:])
 
 		dialog.ShowInformation(tr("success"), tr("password_changed_ok"), win)
 		win.Close()

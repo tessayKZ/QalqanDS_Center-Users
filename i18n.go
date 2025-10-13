@@ -35,6 +35,7 @@ var i18n = map[string]map[string]string{
 		"copy":                         "Copy",
 		"copied_to_clipboard":          "Copied to clipboard",
 		"keys_left":                    "Keys left",
+		"keys_left_inout":              "In: %d | Out: %d",
 		"encrypt_card_hint":            "Encrypt a file and save as .bin",
 		"decrypt_card_hint":            "Decrypt a .bin file back to original",
 		"keys_loaded_hash":             "Keys loaded. Hash: %s",
@@ -58,6 +59,11 @@ var i18n = map[string]map[string]string{
 		"encrypting":                   "Encrypting...",
 		"decrypting":                   "Decrypting...",
 		"encrypt_to":                   "Encrypt to",
+		"key_type_session":             "Session keys",
+		"key_type_circle":              "Circle keys",
+		"user_n":                       "№%d",
+		"keys_file_updated":            "Key file updated on disk",
+		"keys_countdown":               "%d %s until key rotation (%s)",
 
 		// Change password
 		"change_password":        "Change password",
@@ -107,6 +113,7 @@ var i18n = map[string]map[string]string{
 		"copy":                         "Копировать",
 		"copied_to_clipboard":          "Скопировано в буфер",
 		"keys_left":                    "Осталось ключей",
+		"keys_left_inout":              "Входящих: %d | Исходящих: %d",
 		"encrypt_card_hint":            "Зашифровать файл и сохранить как .bin",
 		"decrypt_card_hint":            "Расшифровать .bin обратно в исходный",
 		"keys_loaded_hash":             "Ключи загружены. Хэш: %s",
@@ -130,6 +137,11 @@ var i18n = map[string]map[string]string{
 		"encrypting":                   "Шифрование...",
 		"decrypting":                   "Расшифрование...",
 		"encrypt_to":                   "Зашифровать для",
+		"key_type_session":             "Сессионные ключи",
+		"key_type_circle":              "Циркулярные ключи",
+		"user_n":                       "№%d",
+		"keys_file_updated":            "Файл ключей обновлён на диске",
+		"keys_countdown":               "Осталось до смены ключей %d %s (%s)",
 
 		// Change password
 		"change_password":        "Смена пароля",
@@ -179,6 +191,7 @@ var i18n = map[string]map[string]string{
 		"copy":                         "Көшіріп алу",
 		"copied_to_clipboard":          "Алмасу буферіне көшірілді",
 		"keys_left":                    "Қалған кілттер",
+		"keys_left_inout":              "Кіріс: %d | Шығыс: %d",
 		"encrypt_card_hint":            "Файлды шифрлап .bin ретінде сақтау",
 		"decrypt_card_hint":            ".bin файлын бастапқысына қайтару",
 		"keys_loaded_hash":             "Кілттер жүктелді. Хэш: %s",
@@ -202,6 +215,11 @@ var i18n = map[string]map[string]string{
 		"encrypting":                   "Шифрлау...",
 		"decrypting":                   "Дешифрлау...",
 		"encrypt_to":                   "Кімге шифрлеу",
+		"key_type_session":             "Сеанстық кілттер",
+		"key_type_circle":              "Циркулярлық кілттер",
+		"user_n":                       "№%d",
+		"keys_file_updated":            "Кілттердің файлы дискіде жаңартылды",
+		"keys_countdown":               "Кілттерді ауыстыруға %d %s қалды (%s)",
 
 		// Change password
 		"change_password":        "Құпиясөзді өзгерту",

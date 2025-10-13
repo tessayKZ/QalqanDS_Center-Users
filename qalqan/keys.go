@@ -1,9 +1,18 @@
 /*__________________________________________________________________________
 					center.bin files structure
+* [16] byte:
+	[0] - date of use keys high 1 bit
+	[1] - date of use keys low 1 bit
+	[2] - date of use key high 1 bit
+	[3] - date of use key low 1 bit
+	[4] - count IN keys in file (BE16)
+	[5] - count OUT keys in file (BE16)
+	[6..15] - trash data
+
 * [32] byte - Kikey;
 * [100][32] byte - Circle key;
-* [1000][32] byte - Session keys <in> * users count;
-* [1000][32] byte - Session keys <out> * users count;
+* [2000][32] byte - Session keys <out> * users count;
+* [2000][32] byte - Session keys <in> * users count;
 * [16] byte - imit.
 /*__________________________________________________________________________
 					abc.bin files structure
@@ -13,11 +22,15 @@
 	[2] - low 4 bits of session in keys
 	[3] - high 4 bits of session out keys
 	[4] - low 4 bits of session out keys
-	[5..15] - half imit circle key
+	[5] - date of use keys high 1 bit
+	[6] - date of use keys low 1 bit
+	[7] - date of use key high 1 bit
+	[8] - date of use key low 1 bit
+	[9..15] - trash data
 * [32] byte - Kikey;
 * [100][32] byte - Circle key;
-* [1000][32] byte - Session keys <in>;
-* [1000][32] byte - Session keys <out>;
+* [2000][32] byte - Session keys <in>;
+* [2000][32] byte - Session keys <out>;
 * [16] byte - imit.
 ----------------------------------------------------------------------------
 				16 byte metadata on files encrypted/decrypted
@@ -28,7 +41,7 @@
 [4] - 0x00 - file,
 	  0x77 - video,
 	  0x88 - photo,
-	  0x66 - text (message),
+	  0x00 - text (message),
 	  0x55 - audio.
 [5] - key type circle or session key:
 	  0x00 = circle
@@ -37,7 +50,7 @@
 [6]   = circle_index (0..99)
 [7]   = session_index low8 (lower 8 bits of index 0..999)
 [8]   = session_index_hi2 (2 most significant bits of the index: bits 0..1)
-[9..[15] = 0x00 (reserved)
+[9..[15] = reserved/trash
 ____________________________________________________________________________
 */
 
@@ -47,11 +60,12 @@ import (
 	"bytes"
 	"crypto/sha512"
 	"fmt"
+	"io"
 )
 
 type SessionKeySet struct {
-	In  [1000][DEFAULT_KEY_LEN]byte
-	Out [1000][DEFAULT_KEY_LEN]byte
+	In  [][DEFAULT_KEY_LEN]byte
+	Out [][DEFAULT_KEY_LEN]byte
 }
 
 func Hash512(value string) [32]byte {
@@ -65,97 +79,62 @@ func Hash512(value string) [32]byte {
 	return hash32
 }
 
-func LoadSessionKeys(data []byte, ostream *bytes.Buffer, rKey []byte, session_keys *[]SessionKeySet) {
-	const perDir = 1000 * DEFAULT_KEY_LEN
-	const perUser = 2 * perDir // IN + OUT
-
-	rem := ostream.Len()
-	if rem < BLOCKLEN {
-		fmt.Println("LoadSessionKeys: not enough data (no room for IMIT)")
-		return
-	}
-
-	sessBytes := rem - BLOCKLEN
-
-	hasFooter := false
-	if len(data) >= 2*BLOCKLEN {
-		off := len(data) - 2*BLOCKLEN
-		if off >= 0 && bytes.Equal(data[off:off+4], []byte{'Q', 'P', 'W', 'D'}) {
-			hasFooter = true
-		}
-	}
-	if hasFooter {
-		if sessBytes < BLOCKLEN {
-			fmt.Println("LoadSessionKeys: malformed length (footer but too short)")
-			return
-		}
-		sessBytes -= BLOCKLEN
-	}
-
-	if sessBytes%perUser != 0 {
-		fmt.Printf("LoadSessionKeys: malformed length: %d is not multiple of %d\n", sessBytes, perUser)
-		return
-	}
-	usr_cnt := sessBytes / perUser
-	if usr_cnt <= 0 || usr_cnt > 255 {
-		fmt.Printf("LoadSessionKeys: suspicious user count: %d\n", usr_cnt)
-		return
-	}
-
-	*session_keys = make([]SessionKeySet, usr_cnt)
-
-	readKey := make([]byte, DEFAULT_KEY_LEN)
-
-	for u := 0; u < usr_cnt; u++ {
-		// IN
-		for i := 0; i < 1000; i++ {
-			n, err := ostream.Read(readKey[:DEFAULT_KEY_LEN])
-			if err != nil || n != DEFAULT_KEY_LEN {
-				fmt.Println("LoadSessionKeys: error reading session IN key:", err)
-				return
-			}
-			for j := 0; j < DEFAULT_KEY_LEN; j += BLOCKLEN {
-				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, DEFAULT_KEY_LEN, BLOCKLEN, readKey[j:j+BLOCKLEN])
-			}
-			copy((*session_keys)[u].In[i][:], readKey[:])
-		}
-		// OUT
-		for i := 0; i < 1000; i++ {
-			n, err := ostream.Read(readKey[:DEFAULT_KEY_LEN])
-			if err != nil || n != DEFAULT_KEY_LEN {
-				fmt.Println("LoadSessionKeys: error reading session OUT key:", err)
-				return
-			}
-			for j := 0; j < DEFAULT_KEY_LEN; j += BLOCKLEN {
-				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, DEFAULT_KEY_LEN, BLOCKLEN, readKey[j:j+BLOCKLEN])
-			}
-			copy((*session_keys)[u].Out[i][:], readKey[:])
-		}
-	}
-}
-
-func LoadCircleKeys(data []byte, ostream *bytes.Buffer, rKey []byte, circle_keys *[100][32]byte) {
-	*circle_keys = [100][32]byte{}
-
-	if ostream.Len() < 100*DEFAULT_KEY_LEN {
-		fmt.Printf("LoadCircleKeys: not enough data for 100 circle keys (have %d)\n", ostream.Len())
-		return
-	}
+// Загружаем РОВНО count circle-ключей из текущей позиции буфера.
+func LoadCircleKeys(
+	ostream *bytes.Buffer,
+	rKey []byte,
+	dst *[][DEFAULT_KEY_LEN]byte,
+	count int,
+) error {
+	*dst = make([][DEFAULT_KEY_LEN]byte, count)
 
 	readCircleKey := make([]byte, DEFAULT_KEY_LEN)
-	for i := 0; i < 100; i++ {
+	for i := 0; i < count; i++ {
 		n, err := ostream.Read(readCircleKey[:DEFAULT_KEY_LEN])
-		if err != nil {
-			fmt.Printf("LoadCircleKeys: failed to read circle key %d: %v\n", i, err)
-			return
-		}
-		if n != DEFAULT_KEY_LEN {
-			fmt.Printf("LoadCircleKeys: unexpected EOF while reading circle key %d\n", i)
-			return
+		if err != nil || n != DEFAULT_KEY_LEN {
+			return fmt.Errorf("LoadCircleKeys: read circle %d: %v", i, err)
 		}
 		for j := 0; j < DEFAULT_KEY_LEN; j += BLOCKLEN {
 			DecryptOFB(readCircleKey[j:j+BLOCKLEN], rKey, DEFAULT_KEY_LEN, BLOCKLEN, readCircleKey[j:j+BLOCKLEN])
 		}
-		copy((*circle_keys)[i][:], readCircleKey[:])
+		copy((*dst)[i][:], readCircleKey[:])
 	}
+	return nil
+}
+
+func LoadSessionKeysDynamic(
+	ostream *bytes.Buffer,
+	rKey []byte,
+	sessionKeys *[]SessionKeySet,
+	inCnt, outCnt, users int,
+) error {
+	const k32 = DEFAULT_KEY_LEN
+
+	*sessionKeys = make([]SessionKeySet, users)
+	readKey := make([]byte, k32)
+
+	for u := 0; u < users; u++ {
+		(*sessionKeys)[u].In = make([][DEFAULT_KEY_LEN]byte, inCnt)
+		for i := 0; i < inCnt; i++ {
+			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
+				return fmt.Errorf("LoadSessionKeysDynamic User: read IN u=%d i=%d: %w", u, i, err)
+			}
+			for j := 0; j < k32; j += BLOCKLEN {
+				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
+			}
+			copy((*sessionKeys)[u].In[i][:], readKey[:])
+		}
+		(*sessionKeys)[u].Out = make([][DEFAULT_KEY_LEN]byte, outCnt)
+		for i := 0; i < outCnt; i++ {
+			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
+				return fmt.Errorf("LoadSessionKeysDynamic User: read OUT u=%d i=%d: %w", u, i, err)
+			}
+			for j := 0; j < k32; j += BLOCKLEN {
+				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
+			}
+			copy((*sessionKeys)[u].Out[i][:], readKey[:])
+		}
+	}
+
+	return nil
 }

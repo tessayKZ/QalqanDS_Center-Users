@@ -5,10 +5,12 @@ import (
 	"bytes"
 	crand "crypto/rand"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
 	mrand "math/rand"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -25,22 +27,29 @@ import (
 )
 
 const (
-	// file types
 	FileTypeGeneric = 0x00
 	FileTypeVideo   = 0x77
 	FileTypePhoto   = 0x88
 	FileTypeText    = 0x00
 	FileTypeAudio   = 0x55
 
-	// key types
-	KeyTypeCircle     = 0x00
-	KeyTypeSessionOut = 0x01
-	KeyTypeSessionIn  = 0x02
-
 	MaxPlainSize int64 = 2 * 1024 * 1024 * 1024 // 2Gb
 
-	MaxEncryptedSize int64 = MaxPlainSize + 64
+	MaxEncryptedSize int64 = MaxPlainSize + 80 // (serviceinfo + metaImit + IV + fileImit) +16 (возможное выравнивание до 16)
+
+	KeysValidityDays = 90
+	KeyValidityDays  = 30
 )
+
+type KeyPref int
+
+const (
+	KeyPrefSession KeyPref = iota
+	KeyPrefCircle
+)
+
+var SkeyInCnt int
+var SkeyOutCnt int
 
 // simple progress-aware reader for dialogs
 type progressReader struct {
@@ -78,39 +87,74 @@ type ServiceInfo struct {
 	SessionIndex int  // [7..8] (0..999) или -1, если не используется
 }
 
-func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int) [qalqan.BLOCKLEN]byte {
+func SetLocalUserNumber(n int) {
+	if n <= 0 || n > 255 {
+		n = 1
+	}
+	localUserNumber = byte(n)
+}
+
+func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int, targetIdx int) [qalqan.BLOCKLEN]byte {
 	var s [qalqan.BLOCKLEN]byte
 	s[0] = 0x00
-	s[1] = localUserNumber
+	if isCenterMode {
+		s[1] = byte(targetIdx + 1) // адресат для центра
+	} else {
+		s[1] = byte(localUserNumber) // номер отправителя (1..N)
+	}
 	s[2] = 0x04
 	s[3] = byte(qalqan.DEFAULT_KEY_LEN) // 0x20
 	s[4] = fileTypeCode
 	s[5] = keyType
-	if circleNo >= 0 && circleNo < 100 {
+
+	// circle index — проверяем по длине среза
+	if circleNo >= 0 && circleNo < len(circle_keys) {
 		s[6] = byte(circleNo)
 	}
-	if usedIdx >= 0 && usedIdx < 1000 {
-		stored := usedIdx + 1             // 1-based
-		s[7] = byte((stored >> 8) & 0xFF) // HI8 -> [7]
-		s[8] = byte(stored & 0x03)        // LO2 -> [8] (2 младших бита)
+
+	// session index — кладём только если в допустимых пределах
+	if usedIdx >= 0 {
+		// ограничим по максимальному числу сессионных ключей (In/Out)
+		maxIdx := SkeyInCnt
+		if SkeyOutCnt > maxIdx {
+			maxIdx = SkeyOutCnt
+		}
+		if usedIdx < maxIdx {
+			// ВНИМАНИЕ: текущий формат кодирует индекс 11 битами (max 2047)
+			if usedIdx <= 2047 {
+				stored := usedIdx + 1 // 1-based
+				lo8 := byte(stored & 0xFF)
+				hi3 := byte((stored >> 8) & 0x07)
+				s[7] = lo8
+				s[8] = (s[8] &^ 0x87) | hi3 | 0x80
+			}
+		}
 	}
 	// [9..15] = 0
 	return s
 }
 
-func cloneSessionKeys(src []qalqan.SessionKeySet) []qalqan.SessionKeySet {
-	if len(src) == 0 {
-		return nil
+func decodeSessionIndex(si []byte) int {
+	if len(si) < 9 {
+		return -1
 	}
-	dst := make([]qalqan.SessionKeySet, len(src))
-	copy(dst, src)
-	return dst
+	if (si[8] & 0x80) != 0 { // v2
+		lo8 := int(si[7])
+		hi3 := int(si[8] & 0x07)
+		return (hi3<<8 | lo8) - 1
+	}
+	// legacy: 10 бит (hi8 в s[7], lo2 в s[8]&0x03)
+	lo2 := int(si[8] & 0x03)
+	hi8 := int(si[7])
+	return (hi8<<2 | lo2) - 1
 }
+
+func keyPrefIsSession() bool { return keyPref == KeyPrefSession }
 
 func suggestEncryptedNameFromPath(p string) string {
 	b := baseName(p)
 	if strings.EqualFold(filepath.Ext(b), ".bin") {
-		return b // уже .bin
+		return b
 	}
 	return b + ".bin"
 }
@@ -146,17 +190,167 @@ func suggestDecryptedNameFromPath(p string, fileType byte) string {
 	return name
 }
 
+func readKeysExpiryDates(path string, centerMode bool) (keysExp, keyExp time.Time, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	defer f.Close()
+
+	hdr := make([]byte, 16)
+	if _, err = io.ReadFull(f, hdr); err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+
+	if centerMode {
+		ke := unix32LEToTime(hdr[0:4])
+		e := unix32LEToTime(hdr[4:8])
+
+		if ke.IsZero() {
+			start := be16DaysToTime(hdr[0], hdr[1])
+			if !start.IsZero() {
+				ke = start.AddDate(0, 0, KeysValidityDays)
+			}
+		}
+		if e.IsZero() {
+			start := be16DaysToTime(hdr[2], hdr[3])
+			if !start.IsZero() {
+				e = start.AddDate(0, 0, KeyValidityDays)
+			}
+		}
+		return ke, e, nil
+	}
+
+	startKeys := be16DaysToTime(hdr[5], hdr[6])
+	startKey := be16DaysToTime(hdr[7], hdr[8])
+	if !startKeys.IsZero() {
+		startKeys = startKeys.AddDate(0, 0, KeysValidityDays)
+	}
+	if !startKey.IsZero() {
+		startKey = startKey.AddDate(0, 0, KeyValidityDays)
+	}
+	return startKeys, startKey, nil
+}
+
+func ruDays(n int) string {
+	a := n % 100
+	if a >= 11 && a <= 14 {
+		return "дней"
+	}
+	b := n % 10
+	switch b {
+	case 1:
+		return "день"
+	case 2, 3, 4:
+		return "дня"
+	default:
+		return "дней"
+	}
+}
+
+func enDays(n int) string {
+	if n == 1 {
+		return "day"
+	}
+	return "days"
+}
+
+func daysWord(n int) string {
+	switch strings.ToUpper(currentLang) {
+	case "RU":
+		return ruDays(n)
+	case "KZ":
+		return "күн"
+	default:
+		return enDays(n)
+	}
+}
+
+func formatKeysCountdownText(exp time.Time) string {
+	if exp.IsZero() {
+		return ""
+	}
+	now := time.Now()
+	leftDays := int(exp.Sub(now).Hours() / 24)
+	if leftDays < 0 {
+		leftDays = 0
+	}
+	d := exp.Format("02.01.2006")
+	return fmt.Sprintf(tr("keys_countdown"), leftDays, daysWord(leftDays), d)
+}
+
+func unix32LEToTime(b []byte) time.Time {
+	if len(b) < 4 {
+		return time.Time{}
+	}
+	ts := binary.LittleEndian.Uint32(b)
+	if ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(ts), 0).In(time.Local)
+}
+
+func be16DaysToTime(hi, lo byte) time.Time {
+	days := int64(hi)<<8 | int64(lo)
+	if days <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(days*86400, 0).In(time.Local)
+}
+
+func updateKeysDates(keysPath string) {
+	keysExp, _, err := readKeysExpiryDates(keysPath, isCenterMode)
+	if err != nil {
+		keysDatesText = ""
+		keysExpiryCache = time.Time{}
+	} else {
+		keysExpiryCache = keysExp
+		keysDatesText = formatKeysCountdownText(keysExpiryCache)
+	}
+	if keysDateLabel != nil {
+		runOnMain(func() { keysDateLabel.SetText(keysDatesText) })
+	}
+}
+
+func getSessionKeyExact(userIdx int, in bool, idx int) []byte {
+	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) || idx < 0 {
+		return nil
+	}
+	if in {
+		if idx >= len(session_keys[userIdx].In) {
+			return nil
+		}
+		key := &session_keys[userIdx].In[idx]
+		if sessionKeyAllZero(key) {
+			return nil
+		}
+		rkey := make([]uint8, qalqan.EXPKLEN)
+		qalqan.Kexp(key[:], qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
+		return rkey
+	}
+	if idx >= len(session_keys[userIdx].Out) {
+		return nil
+	}
+	key := &session_keys[userIdx].Out[idx]
+	if sessionKeyAllZero(key) {
+		return nil
+	}
+	rkey := make([]uint8, qalqan.EXPKLEN)
+	qalqan.Kexp(key[:], qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
+	return rkey
+}
+
 var (
 	isCenterMode    bool
 	session_keys    []qalqan.SessionKeySet
-	session_keys_ro []qalqan.SessionKeySet
-	circle_keys     [100][qalqan.DEFAULT_KEY_LEN]byte
+	circle_keys     [][qalqan.DEFAULT_KEY_LEN]byte
 	rimitkey        []byte
-
 	localUserIndex       = 0
 	localUserNumber byte = 1
-
-	lastKeyHashHex string
+	keysDateLabel   *widget.Label
+	keysDatesText   string
+	lastKeyHashHex  string
+	keysExpiryCache time.Time
 )
 
 func init() {
@@ -166,12 +360,15 @@ func init() {
 func ApplyLocalUserContext(keysPath string, users int) {
 	base := strings.ToLower(filepath.Base(keysPath))
 	if strings.Contains(base, "center") || users > 1 {
+		isCenterMode = true
 		localUserNumber = 0x33
 		localUserIndex = 0
 	} else {
+		isCenterMode = false
 		localUserNumber = 1
 		localUserIndex = 0
 	}
+	updateKeysDates(keysPath)
 }
 
 func sessionKeyAllZero(k *[qalqan.DEFAULT_KEY_LEN]byte) bool {
@@ -183,35 +380,73 @@ func sessionKeyAllZero(k *[qalqan.DEFAULT_KEY_LEN]byte) bool {
 	return true
 }
 
-func getSessionKeyExact(userIdx int, useOut bool, idx int) []uint8 {
-	if len(session_keys_ro) == 0 || userIdx < 0 || userIdx >= len(session_keys_ro) || idx < 0 || idx >= 1000 {
+func circleKeyAllZero(k *[qalqan.DEFAULT_KEY_LEN]byte) bool {
+	for i := 0; i < qalqan.DEFAULT_KEY_LEN; i++ {
+		if k[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func useAndDeleteCircleKey(circleKeyNumber int) []uint8 {
+	if circleKeyNumber < 0 || circleKeyNumber >= len(circle_keys) {
 		return nil
 	}
-	var key []byte
-	if useOut {
-		if sessionKeyAllZero(&session_keys_ro[userIdx].Out[idx]) {
-			return nil
-		}
-		key = session_keys_ro[userIdx].Out[idx][:]
-	} else {
-		if sessionKeyAllZero(&session_keys_ro[userIdx].In[idx]) {
-			return nil
-		}
-		key = session_keys_ro[userIdx].In[idx][:]
+	if circleKeyAllZero(&circle_keys[circleKeyNumber]) {
+		return nil
 	}
+	key := circle_keys[circleKeyNumber][:]
 	rkey := make([]uint8, qalqan.EXPKLEN)
 	qalqan.Kexp(key, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
+
+	if !isCenterMode {
+		for i := 0; i < qalqan.DEFAULT_KEY_LEN; i++ {
+			circle_keys[circleKeyNumber][i] = 0
+		}
+	}
 	return rkey
+}
+
+func pickAnyCircleKey() (int, []byte) {
+	if len(circle_keys) == 0 {
+		return -1, nil
+	}
+	allEmpty := true
+	for i := 0; i < len(circle_keys); i++ {
+		if !circleKeyAllZero(&circle_keys[i]) {
+			allEmpty = false
+			break
+		}
+	}
+	if allEmpty {
+		return -1, nil
+	}
+	start := mrand.Intn(len(circle_keys))
+	for i := 0; i < len(circle_keys); i++ {
+		idx := (start + i) % len(circle_keys)
+		if rk := useAndDeleteCircleKey(idx); rk != nil {
+			return idx, rk
+		}
+	}
+	return -1, nil
 }
 
 func useAndDeleteSessionOut(userIdx int, start int) ([]uint8, int) {
 	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) {
 		return nil, -1
 	}
-	idx := start % 1000
+	outCnt := len(session_keys[userIdx].Out)
+	if outCnt <= 0 {
+		return nil, -1
+	}
+	if isCenterMode {
+		start = mrand.Intn(outCnt)
+	}
+	idx := start % outCnt
 	found := false
-	for i := 0; i < 1000; i++ {
-		try := (start + i) % 1000
+	for i := 0; i < outCnt; i++ {
+		try := (start + i) % outCnt
 		if !sessionKeyAllZero(&session_keys[userIdx].Out[try]) {
 			idx = try
 			found = true
@@ -221,25 +456,16 @@ func useAndDeleteSessionOut(userIdx int, start int) ([]uint8, int) {
 	if !found {
 		return nil, -1
 	}
-
 	key := session_keys[userIdx].Out[idx][:]
 	rkey := make([]uint8, qalqan.EXPKLEN)
 	qalqan.Kexp(key, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
 
-	for i := 0; i < qalqan.DEFAULT_KEY_LEN; i++ {
-		session_keys[userIdx].Out[idx][i] = 0
+	if !isCenterMode {
+		for i := 0; i < qalqan.DEFAULT_KEY_LEN; i++ {
+			session_keys[userIdx].Out[idx][i] = 0
+		}
 	}
 	return rkey, idx
-}
-
-func useAndDeleteCircleKey(circleKeyNumber int) []uint8 {
-	if circleKeyNumber < 0 || circleKeyNumber >= len(circle_keys) {
-		return nil
-	}
-	key := circle_keys[circleKeyNumber][:qalqan.DEFAULT_KEY_LEN]
-	rkey := make([]uint8, qalqan.EXPKLEN)
-	qalqan.Kexp(key, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
-	return rkey
 }
 
 func countRemainingSessionOut(userIdx int) int {
@@ -247,8 +473,21 @@ func countRemainingSessionOut(userIdx int) int {
 		return 0
 	}
 	cnt := 0
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < len(session_keys[userIdx].Out); i++ {
 		if !sessionKeyAllZero(&session_keys[userIdx].Out[i]) {
+			cnt++
+		}
+	}
+	return cnt
+}
+
+func countRemainingSessionIn(userIdx int) int {
+	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) {
+		return 0
+	}
+	cnt := 0
+	for i := 0; i < len(session_keys[userIdx].In); i++ {
+		if !sessionKeyAllZero(&session_keys[userIdx].In[i]) {
 			cnt++
 		}
 	}
@@ -263,26 +502,26 @@ func baseName(path string) string {
 	return b
 }
 
-func chooseKeyForEncryption(targetUserIdx int) (rKey []byte, keyType byte, circleKeyNumber byte, sessionKeyNumber byte, usedIdx int, err error) {
-	if len(session_keys) > 0 {
+func chooseKeyForEncryption(targetUserIdx int, useSession bool) (rKey []byte, keyTypeByte byte, circleIndex int, usedIdx int, err error) {
+	if useSession {
+		if len(session_keys) == 0 {
+			return nil, 0, -1, -1, fmt.Errorf("no session keys loaded")
+		}
 		uidx := targetUserIdx
 		if uidx < 0 || uidx >= len(session_keys) {
 			uidx = localUserIndex
 		}
 		start := 0
 		if rk, idx := useAndDeleteSessionOut(uidx, start); rk != nil && idx >= 0 {
-			return rk, KeyTypeSessionOut, 0, byte(idx), idx, nil
+			return rk, 0x01, -1, idx, nil // 0x01 = session
 		}
-		return nil, 0, 0, 0, -1, fmt.Errorf("session keys empty for user #%d", uidx+1)
+		return nil, 0, -1, -1, fmt.Errorf("session keys empty for user #%d", uidx+1)
 	}
 
-	if len(circle_keys) > 0 {
-		cn := mrand.Intn(100)
-		if rk := useAndDeleteCircleKey(cn); rk != nil {
-			return rk, KeyTypeCircle, byte(cn), 0, -1, nil
-		}
+	if ci, rk := pickAnyCircleKey(); rk != nil {
+		return rk, 0x00, ci, -1, nil // 0x00 = circle
 	}
-	return nil, 0, 0, 0, -1, fmt.Errorf("no encryption keys available")
+	return nil, 0, -1, -1, fmt.Errorf("no circle keys available")
 }
 
 func makeLogsArea() (*widget.RichText, fyne.CanvasObject) {
@@ -304,6 +543,7 @@ func makeLogsArea() (*widget.RichText, fyne.CanvasObject) {
 	toolbar := container.NewHBox(
 		layout.NewSpacer(),
 		container.NewGridWrap(fyne.NewSize(140, 36), clearLogBtn),
+		layout.NewSpacer(),
 	)
 
 	card := widget.NewCard("", "", container.NewVBox(
@@ -331,6 +571,22 @@ func encodeHashBoxContent() string {
 	return lastKeyHashHex
 }
 
+func keyPrefOptions() []string {
+	return []string{tr("key_type_session"), tr("key_type_circle")}
+}
+func keyPrefToLabel(p KeyPref) string {
+	if p == KeyPrefCircle {
+		return tr("key_type_circle")
+	}
+	return tr("key_type_session")
+}
+func labelToKeyPref(s string) KeyPref {
+	if s == tr("key_type_circle") {
+		return KeyPrefCircle
+	}
+	return KeyPrefSession
+}
+
 func InitMainUI(app fyne.App, win fyne.Window) {
 	bgImage := canvas.NewImageFromFile("assets/background.png")
 	bgImage.FillMode = canvas.ImageFillStretch
@@ -348,8 +604,12 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		if decBtn != nil {
 			decBtn.SetText(tr("decrypt"))
 		}
-		if keysLeftCaptionLabel != nil {
-			keysLeftCaptionLabel.SetText(tr("keys_left"))
+		if keysLeftLabel != nil {
+			idx := selectedUserIdx
+			if !isCenterMode {
+				idx = localUserIndex
+			}
+			keysLeftLabel.SetText(formatKeysLeft(idx))
 		}
 		if encHintLabel != nil {
 			encHintLabel.SetText(tr("encrypt_card_hint"))
@@ -368,21 +628,50 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 			recipientCard.Subtitle = tr("encrypt_to")
 			recipientCard.Refresh()
 		}
-
+		if keyTypeCard != nil {
+			keyTypeCard.Subtitle = tr("select_key_type")
+			keyTypeCard.Refresh()
+		}
+		if keyTypeSelect != nil {
+			keyTypeSelect.Options = keyPrefOptions()
+			keyTypeSelect.SetSelected(keyPrefToLabel(keyPref))
+		}
+		if keysLeftCaptionLabel != nil {
+			keysLeftCaptionLabel.SetText(tr("keys_left"))
+		}
+		if keysDateLabel != nil {
+			keysDateLabel.SetText(formatKeysCountdownText(keysExpiryCache))
+		}
 	}
 
 	logs, logsArea := makeLogsArea()
 
-	keysLeftLabel = widget.NewLabelWithStyle(fmt.Sprintf("%d", countRemainingSessionOut(localUserIndex)),
+	keysLeftLabel = widget.NewLabelWithStyle(formatKeysLeft(localUserIndex),
 		fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	keysLeftLabel.TextStyle.Monospace = true
-	keysLeftCaptionLabel = widget.NewLabelWithStyle(tr("keys_left"), fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
+
+	keysLeftCaptionLabel = widget.NewLabelWithStyle(tr("keys_left"),
+		fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
 
 	keysCard := widget.NewCard("", "", container.NewVBox(
 		container.NewCenter(keysLeftLabel),
 		container.NewCenter(keysLeftCaptionLabel),
 	))
-	keysWrap := container.NewGridWrap(fyne.NewSize(140, 120), keysCard)
+	keysWrap := container.NewGridWrap(fyne.NewSize(280, 100), keysCard)
+
+	if len(session_keys) > 0 {
+		keyPref = KeyPrefSession
+	} else {
+		keyPref = KeyPrefCircle
+	}
+
+	keyTypeSelect = widget.NewSelect(keyPrefOptions(), func(s string) {
+		keyPref = labelToKeyPref(s)
+	})
+	keyTypeSelect.SetSelected(keyPrefToLabel(keyPref))
+
+	keyTypeCard = widget.NewCard("", tr("select_key_type"), container.NewVBox(keyTypeSelect))
+	keyTypeWrap := container.NewGridWrap(fyne.NewSize(200, 100), keyTypeCard)
 
 	var recipientWrap fyne.CanvasObject
 	if isCenterMode && len(session_keys) > 0 {
@@ -393,15 +682,15 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		recipientSelect = widget.NewSelect(opts, func(val string) {
 			if i, err := strconv.Atoi(val); err == nil {
 				selectedUserIdx = i - 1
-				keysLeftLabel.SetText(fmt.Sprintf("%d", countRemainingSessionOut(selectedUserIdx)))
+				keysLeftLabel.SetText(formatKeysLeft(selectedUserIdx))
 			}
 		})
 		selectedUserIdx = 0
 		recipientSelect.SetSelected(opts[0])
-		keysLeftLabel.SetText(fmt.Sprintf("%d", countRemainingSessionOut(selectedUserIdx)))
+		keysLeftLabel.SetText(formatKeysLeft(selectedUserIdx))
 
 		recipientCard = widget.NewCard("", tr("encrypt_to"), container.NewVBox(recipientSelect))
-		recipientWrap = container.NewGridWrap(fyne.NewSize(200, 120), recipientCard)
+		recipientWrap = container.NewGridWrap(fyne.NewSize(200, 100), recipientCard)
 	} else {
 		selectedUserIdx = localUserIndex
 	}
@@ -414,11 +703,9 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 
 	encIcon, _ := fyne.LoadResourceFromPath("assets/encrypt.png")
 	if encIcon == nil {
-		encIcon = theme.ConfirmIcon()
 	}
 	decIcon, _ := fyne.LoadResourceFromPath("assets/decrypt.png")
 	if decIcon == nil {
-		decIcon = theme.CancelIcon()
 	}
 
 	encHintLabel = widget.NewLabelWithStyle(tr("encrypt_card_hint"), fyne.TextAlignCenter, fyne.TextStyle{})
@@ -432,18 +719,26 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		decHintLabel,
 	))
 
-	encCardWrap := container.NewGridWrap(fyne.NewSize(280, 160), encCard)
-	decCardWrap := container.NewGridWrap(fyne.NewSize(280, 160), decCard)
+	encCardWrap := container.NewGridWrap(fyne.NewSize(285, 110), encCard)
+	decCardWrap := container.NewGridWrap(fyne.NewSize(285, 110), decCard)
 
 	modeLabel = widget.NewLabelWithStyle(getModeLabelText(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
+	keysDateLabel = widget.NewLabelWithStyle(keysDatesText, fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
+
+	left := container.NewHBox(
+		modeLabel,
+		widget.NewLabel("  "),
+		keysDateLabel,
+	)
+
 	topBar := container.NewHBox(
-		container.NewPadded(modeLabel),
+		container.NewPadded(left),
 		layout.NewSpacer(),
 		container.NewGridWrap(fyne.NewSize(65, 28), selectedLanguage),
 	)
 
-	rowElems := []fyne.CanvasObject{layout.NewSpacer(), keysWrap}
+	rowElems := []fyne.CanvasObject{layout.NewSpacer(), keysWrap, widget.NewLabel("  "), keyTypeWrap}
 	if recipientWrap != nil {
 		rowElems = append(rowElems, widget.NewLabel("  "), recipientWrap)
 	}
@@ -495,8 +790,8 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 
 var (
 	keysLeftLabel              *widget.Label
-	encBtn, decBtn             *widget.Button
 	keysLeftCaptionLabel       *widget.Label
+	encBtn, decBtn             *widget.Button
 	encHintLabel, decHintLabel *widget.Label
 	clearLogBtn                *widget.Button
 	modeLabel                  *widget.Label
@@ -509,10 +804,19 @@ var (
 	selectedUserIdx int
 	recipientSelect *widget.Select
 	recipientCard   *widget.Card
+	keyPref         KeyPref
+	keyTypeSelect   *widget.Select
+	keyTypeCard     *widget.Card
 )
 
-func runOnMain(f func())     { fyne.Do(f) }
-func runOnMainWait(f func()) { fyne.DoAndWait(f) }
+func formatKeysLeft(uIdx int) string {
+	return fmt.Sprintf(tr("keys_left_inout"),
+		countRemainingSessionIn(uIdx),  // In
+		countRemainingSessionOut(uIdx), // Out
+	)
+}
+
+func runOnMain(f func()) { fyne.Do(f) }
 
 func uiProgressStart(title string) {
 	progressTitle = title
@@ -552,15 +856,7 @@ func getModeLabelText() string {
 	if isCenterMode {
 		return tr("mode_center")
 	}
-	return tr("mode_user")
-}
-
-func ownerToUserIndex(owner byte) int {
-	idx := int(owner)
-	if idx >= 0 && idx < len(session_keys_ro) {
-		return idx
-	}
-	return localUserIndex
+	return fmt.Sprintf("%s %s", tr("mode_user"), fmt.Sprintf(tr("user_n"), int(localUserNumber)))
 }
 
 func SetLastKeyHashFromBytes(b []byte) {
@@ -577,7 +873,11 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 		icon = theme.ConfirmIcon()
 	}
 	btn := widget.NewButtonWithIcon(tr("encrypt"), icon, func() {
-		if (len(session_keys) == 0 && len(circle_keys) == 0) || rimitkeyAllZero() {
+		if rimitkeyAllZero() {
+			dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win)
+			return
+		}
+		if (len(session_keys) == 0 || (countRemainingSessionIn(localUserIndex)+countRemainingSessionOut(localUserIndex) == 0)) && noCircleKeys() {
 			dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win)
 			return
 		}
@@ -590,101 +890,108 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 			if reader == nil {
 				return
 			}
-			defer reader.Close()
 
 			uri := reader.URI()
 
-			lr := &io.LimitedReader{R: reader, N: MaxPlainSize + 1}
-			data, err := io.ReadAll(lr)
-			if err != nil {
-				uiLog(logs, fmt.Sprintf(tr("read_error"), err))
-				return
-			}
-			if int64(len(data)) > MaxPlainSize || lr.N == 0 {
-				dialog.ShowError(fmt.Errorf(tr("file_too_big")), win)
-				return
-			}
+			go func(reader fyne.URIReadCloser, uri fyne.URI) {
+				defer reader.Close()
 
-			// в центре шифруем для selectedUserIdx, иначе — для localUserIndex
-			targetIdx := selectedUserIdx
-			if !isCenterMode {
-				targetIdx = localUserIndex
-			}
-			rKey, keyType, circleNo, _, usedIdx, err := chooseKeyForEncryption(targetIdx)
+				lr := &io.LimitedReader{R: reader, N: MaxPlainSize + 1}
+				data, err := io.ReadAll(lr)
+				if err != nil {
+					uiLog(logs, fmt.Sprintf(tr("read_error"), err))
+					return
+				}
+				if int64(len(data)) > MaxPlainSize || lr.N == 0 {
+					runOnMain(func() { dialog.ShowError(fmt.Errorf(tr("file_too_big")), win) })
+					return
+				}
 
-			if err != nil || rKey == nil {
-				dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win)
-				return
-			}
+				targetIdx := selectedUserIdx
+				if !isCenterMode {
+					targetIdx = localUserIndex
+				}
 
-			// IV
-			iv := make([]byte, qalqan.BLOCKLEN)
-			if _, err := crand.Read(iv); err != nil {
-				uiLog(logs, fmt.Sprintf(tr("iv_generation_error"), err))
-				return
-			}
+				// тип файла
+				ext := strings.ToLower(filepath.Ext(uri.Path()))
+				var fileTypeCode byte
+				switch ext {
+				case ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff":
+					fileTypeCode = FileTypePhoto
+				case ".txt", ".md", ".log", ".csv":
+					fileTypeCode = FileTypeText
+				case ".mp3", ".wav", ".ogg", ".m4a", ".flac":
+					fileTypeCode = FileTypeAudio
+				case ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v":
+					fileTypeCode = FileTypeVideo
+				default:
+					fileTypeCode = FileTypeGeneric
+				}
 
-			ext := strings.ToLower(filepath.Ext(uri.Path()))
-			var fileTypeCode byte
-			switch ext {
-			case ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff":
-				fileTypeCode = FileTypePhoto
-			case ".txt", ".md", ".log", ".csv":
-				fileTypeCode = FileTypeText
-			case ".mp3", ".wav", ".ogg", ".m4a", ".flac":
-				fileTypeCode = FileTypeAudio
-			case ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v":
-				fileTypeCode = FileTypeVideo
-			default:
-				fileTypeCode = FileTypeGeneric
-			}
-			svc := buildServiceInfo(fileTypeCode, keyType, int(circleNo), usedIdx)
+				// выбор ключа
+				useSession := keyPrefIsSession()
+				rKey, keyTypeByte, circleNo, usedIdx, err := chooseKeyForEncryption(targetIdx, useSession)
+				if err != nil || rKey == nil {
+					runOnMain(func() { dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win) })
+					return
+				}
 
-			runOnMain(func() {
-			})
-			uiProgressStart(tr("encrypting"))
+				// IV
+				iv := make([]byte, qalqan.BLOCKLEN)
+				if _, err := crand.Read(iv); err != nil {
+					uiLog(logs, fmt.Sprintf(tr("iv_generation_error"), err))
+					return
+				}
 
-			selPath := uri.Path()
-			selName := uri.Name()
+				// заголовок
+				svc := buildServiceInfo(fileTypeCode, keyTypeByte, circleNo, usedIdx, targetIdx)
 
-			go func(selPath, selName string, payload []byte, svc [qalqan.BLOCKLEN]byte, rKey, iv []byte, keyType byte, usedIdx int) {
-				defer func() {
-					if r := recover(); r != nil {
-						uiLog(logs, fmt.Sprintf("panic (encrypt): %v", r))
-					}
-					uiProgressDone()
-				}()
+				uiProgressStart(tr("encrypting"))
 
+				selPath := uri.Path()
+				selName := uri.Name()
+
+				// шифрование
 				ctBuf := &bytes.Buffer{}
 				pr := &progressReader{
-					r:     bytes.NewReader(payload),
-					total: int64(len(payload)),
-					emit: func(f float64) {
-						runOnMain(func() {
-							uiProgressSet(f)
-						})
-					},
+					r:     bytes.NewReader(data),
+					total: int64(len(data)),
+					emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
 				}
-				qalqan.EncryptOFB_File(len(payload), rKey, iv, pr, ctBuf)
+				qalqan.EncryptOFB_File(len(data), rKey, iv, pr, ctBuf)
 
 				out := &bytes.Buffer{}
 				out.Write(svc[:])
+
 				meta := make([]byte, qalqan.BLOCKLEN)
 				qalqan.Qalqan_Imit(uint64(qalqan.BLOCKLEN), rimitkey, bytes.NewReader(svc[:]), meta)
 				out.Write(meta)
+
 				out.Write(iv)
 				out.Write(ctBuf.Bytes())
+
 				fileImit := make([]byte, qalqan.BLOCKLEN)
 				qalqan.Qalqan_Imit(uint64(out.Len()), rimitkey, bytes.NewReader(out.Bytes()), fileImit)
 				out.Write(fileImit)
 
-				if keyType == KeyTypeSessionOut && usedIdx >= 0 {
-					runOnMain(func() {
-						keysLeft.SetText(fmt.Sprintf("%d", countRemainingSessionOut(targetIdx)))
-					})
+				// списание использованных ключей и сохранение
+				if !isCenterMode {
+					if useSession && usedIdx >= 0 {
+						runOnMain(func() {
+							keysLeft.SetText(formatKeysLeft(targetIdx))
+							if isCenterMode && recipientSelect != nil {
+								recipientSelect.SetSelected(strconv.Itoa(targetIdx + 1))
+							}
+						})
+						persistKeysToDiskAsync(logs)
+					}
+					if !useSession {
+						persistKeysToDiskAsync(logs)
+					}
 				}
-				runOnMainWait(func() {
 
+				// сохранение результата
+				runOnMain(func() {
 					saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
 						if err != nil {
 							addLog(logs, fmt.Sprintf(tr("save_error"), err))
@@ -693,34 +1000,45 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 						if writer == nil {
 							return
 						}
-						defer writer.Close()
 
-						if _, err = writer.Write(out.Bytes()); err != nil {
-							addLog(logs, fmt.Sprintf(tr("write_error"), err))
-							return
-						}
-						addLog(logs, tr("encrypt_saved_ok"))
+						go func() {
+							defer writer.Close()
+							data := out.Bytes()
+							const chunk = 8 << 20 // 8MB
+							for off := 0; off < len(data); off += chunk {
+								end := off + chunk
+								if end > len(data) {
+									end = len(data)
+								}
+								if _, werr := writer.Write(data[off:end]); werr != nil {
+									runOnMain(func() {
+										addLog(logs, fmt.Sprintf(tr("write_error"), werr))
+										uiProgressDone()
+									})
+									return
+								}
+								runOnMain(func() { uiProgressSet(float64(end) / float64(len(data))) })
+							}
+							runOnMain(func() {
+								uiProgressDone()
+								addLog(logs, tr("encrypt_saved_ok"))
+							})
+						}()
 					}, win)
 
 					base := selPath
 					if strings.TrimSpace(base) == "" {
 						base = baseName(selName)
 					}
+					saveDialog.Resize(fyne.NewSize(700, 700))
 					saveDialog.SetFileName(suggestEncryptedNameFromPath(base))
 					saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
 					saveDialog.Show()
 				})
-			}(
-				selPath,
-				selName,
-				append([]byte(nil), data...),
-				svc,
-				append([]byte(nil), rKey...),
-				append([]byte(nil), iv...),
-				keyType, usedIdx,
-			)
+			}(reader, uri)
 		}, win)
 
+		fileDialog.Resize(fyne.NewSize(700, 700))
 		fileDialog.Show()
 	})
 	return btn
@@ -738,13 +1056,22 @@ func rimitkeyAllZero() bool {
 	return true
 }
 
+func noCircleKeys() bool {
+	for i := 0; i < len(circle_keys); i++ {
+		if !circleKeyAllZero(&circle_keys[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 	icon, err := fyne.LoadResourceFromPath("assets/decrypt.png")
 	if err != nil {
 		icon = theme.CancelIcon()
 	}
 	btn := widget.NewButtonWithIcon(tr("decrypt"), icon, func() {
-		if len(session_keys_ro) == 0 && len(circle_keys) == 0 {
+		if len(session_keys) == 0 && noCircleKeys() {
 			dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win)
 			return
 		}
@@ -760,7 +1087,6 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 			defer reader.Close()
 
 			uri := reader.URI()
-			uiLog(logs, "Файл выбран для расшифрования: "+uri.String())
 
 			lr := &io.LimitedReader{R: reader, N: MaxEncryptedSize + 1}
 			data, err := io.ReadAll(lr)
@@ -772,13 +1098,12 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 				dialog.ShowError(fmt.Errorf(tr("file_too_big")), win)
 				return
 			}
-
 			if len(data) < 3*qalqan.BLOCKLEN {
 				uiLog(logs, tr("file_too_short"))
 				return
 			}
 
-			// Проверка общего IMIT
+			// общий IMIT
 			calc := make([]byte, qalqan.BLOCKLEN)
 			qalqan.Qalqan_Imit(uint64(len(data)-qalqan.BLOCKLEN), rimitkey, bytes.NewReader(data[:len(data)-qalqan.BLOCKLEN]), calc)
 			rimit := data[len(data)-qalqan.BLOCKLEN:]
@@ -787,7 +1112,7 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 				return
 			}
 
-			// Заголовок
+			// заголовок + его IMIT
 			serviceinfo := data[:qalqan.BLOCKLEN]
 			storedMetaImit := data[qalqan.BLOCKLEN : 2*qalqan.BLOCKLEN]
 			comp := make([]byte, qalqan.BLOCKLEN)
@@ -802,9 +1127,7 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 			fileType := serviceinfo[4]
 			keyType := serviceinfo[5]
 			circleKeyNumber := int(serviceinfo[6])
-			low := int(serviceinfo[8] & 0x03)
-			high := int(serviceinfo[7])
-			sessionIndex := ((high << 8) | low) - 1
+			sessionIndex := decodeSessionIndex(serviceinfo)
 
 			if len(data) < pos+qalqan.BLOCKLEN {
 				uiLog(logs, tr("invalid_file_no_iv"))
@@ -818,44 +1141,23 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 				return
 			}
 			ct := data[pos:end]
+
 			if len(ct)%qalqan.BLOCKLEN != 0 {
 				uiLog(logs, tr("invalid_file_not_enough_data"))
 				return
 			}
 
-			// Ключ
+			uiLog(logs, fmt.Sprintf("svc owner=%d keyType=%02X idx=%d", userNumber, keyType, sessionIndex))
+
+			// выбор ключа
 			var rKey []byte
-			switch keyType {
-			case KeyTypeCircle:
+			uidx := int(userNumber)
+			if keyType == 0 {
 				rKey = useAndDeleteCircleKey(circleKeyNumber)
-			case KeyTypeSessionOut:
-				uidx := ownerToUserIndex(userNumber)
-				if sessionIndex < 0 || sessionIndex >= 1000 {
-					uiLog(logs, tr("invalid_session_index"))
-					return
-				}
-				rKey = getSessionKeyExact(uidx, false, sessionIndex)
-				if rKey == nil {
-					rKey = getSessionKeyExact(uidx, true, sessionIndex)
-				}
-			case KeyTypeSessionIn:
-				uidx := ownerToUserIndex(userNumber)
-				if sessionIndex < 0 || sessionIndex >= 1000 {
-					uiLog(logs, tr("invalid_session_index"))
-					return
-				}
+			} else {
 				rKey = getSessionKeyExact(uidx, true, sessionIndex)
-				if rKey == nil {
-					rKey = getSessionKeyExact(uidx, false, sessionIndex)
-				}
-			default:
-				uiLog(logs, fmt.Sprintf(tr("unknown_key_type"), keyType))
-				return
 			}
-			if rKey == nil {
-				uiLog(logs, tr("decryption_key_not_available"))
-				return
-			}
+
 			uiProgressStart(tr("decrypting"))
 
 			go func(encPath string, ct, iv, rKey []byte, fileType byte) {
@@ -863,27 +1165,24 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 					if r := recover(); r != nil {
 						uiLog(logs, fmt.Sprintf("panic (decrypt): %v", r))
 					}
-					uiProgressDone()
 				}()
 
 				out := &bytes.Buffer{}
 				pr := &progressReader{
 					r:     bytes.NewReader(ct),
 					total: int64(len(ct)),
-					emit: func(f float64) {
-						runOnMain(func() {
-							uiProgressSet(f)
-						})
-					},
+					emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
 				}
 				if err := qalqan.DecryptOFB_File(len(ct), rKey, iv, pr, out); err != nil {
+					runOnMain(func() { uiProgressDone() })
 					uiLog(logs, fmt.Sprintf(tr("decrypt_error"), err))
 					return
 				}
 				plain := out.Bytes()
 
-				runOnMainWait(func() {
+				runOnMain(func() { uiProgressDone() })
 
+				runOnMain(func() {
 					saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
 						if err != nil {
 							addLog(logs, fmt.Sprintf(tr("save_error"), err))
@@ -892,28 +1191,57 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 						if writer == nil {
 							return
 						}
-						defer writer.Close()
 
-						if _, err := writer.Write(plain); err != nil {
-							addLog(logs, fmt.Sprintf(tr("write_error"), err))
-							return
-						}
-						addLog(logs, tr("decrypt_saved_ok"))
+						go func() {
+							defer writer.Close()
+
+							uiProgressStart(tr("saving"))
+
+							const chunk = 8 << 20 // 8MB
+							lastUpdate := time.Now()
+
+							for off := 0; off < len(plain); off += chunk {
+								end := off + chunk
+								if end > len(plain) {
+									end = len(plain)
+								}
+								if _, werr := writer.Write(plain[off:end]); werr != nil {
+									runOnMain(func() {
+										addLog(logs, fmt.Sprintf(tr("write_error"), werr))
+										uiProgressDone()
+									})
+									return
+								}
+								if time.Since(lastUpdate) >= 60*time.Millisecond || end == len(plain) {
+									prog := float64(end) / float64(len(plain))
+									runOnMain(func() { uiProgressSet(prog) })
+									lastUpdate = time.Now()
+								}
+							}
+
+							runOnMain(func() {
+								addLog(logs, tr("decrypt_saved_ok"))
+								uiProgressDone()
+							})
+							persistKeysToDiskAsync(logs)
+						}()
 					}, win)
 
+					saveDialog.Resize(fyne.NewSize(700, 700))
 					saveDialog.SetFileName(suggestDecryptedNameFromPath(encPath, fileType))
 					saveDialog.Show()
 				})
 
 			}(
-				uri.Path(),                   // encPath
-				append([]byte(nil), ct...),   // ct
-				append([]byte(nil), iv...),   // iv
-				append([]byte(nil), rKey...), // rKey
-				fileType,                     // fileType
+				uri.Path(),
+				append([]byte(nil), ct...),
+				append([]byte(nil), iv...),
+				append([]byte(nil), rKey...),
+				fileType,
 			)
 		}, win)
 
+		fileDialog.Resize(fyne.NewSize(700, 700))
 		fileDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
 		fileDialog.Show()
 	})
@@ -924,12 +1252,11 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 func UI_OnKeysLoaded(
 	kikey []byte,
 	sess []qalqan.SessionKeySet,
-	circ [100][qalqan.DEFAULT_KEY_LEN]byte,
+	circ [][qalqan.DEFAULT_KEY_LEN]byte,
 	imitKey []byte,
 	passwordHash32 [32]byte,
 ) {
 	session_keys = sess
-	session_keys_ro = cloneSessionKeys(sess)
 	circle_keys = circ
 	if len(imitKey) == qalqan.EXPKLEN {
 		rimitkey = make([]byte, qalqan.EXPKLEN)

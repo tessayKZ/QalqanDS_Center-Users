@@ -4,6 +4,7 @@ import (
 	"QalqanDS/qalqan"
 	"bytes"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -17,6 +18,13 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
+)
+
+var (
+	keysFilePath      string
+	currentRKey       []byte
+	currentPlainKikey []byte
+	currentHeader     [16]byte
 )
 
 func setWindowIcon(win fyne.Window) {
@@ -75,12 +83,6 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 		exeDir := filepath.Dir(exePath)
-		exePath, err = os.Executable()
-		if err != nil {
-			dialog.ShowError(fmt.Errorf("can't locate executable: %w", err), win)
-			return
-		}
-		exeDir = filepath.Dir(exePath)
 
 		centerPath := filepath.Join(exeDir, "center.bin")
 		abcPath := filepath.Join(exeDir, "abc.bin")
@@ -109,6 +111,8 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 
 		isCenterMode = strings.EqualFold(filepath.Base(keysPath), "center.bin")
 
+		updateKeysDates(keysPath)
+
 		data, err := os.ReadFile(keysPath)
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("can't open %s: %w", keysPath, err), win)
@@ -119,31 +123,57 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 
+		// ... data уже прочитан, проверка длины сделана
 		br := bytes.NewBuffer(data)
 
+		// 1) читаем заголовок и зашифрованный kikey
+		var hdr [16]byte
+		var encKikey [qalqan.DEFAULT_KEY_LEN]byte
+		if _, err := io.ReadFull(br, hdr[:]); err != nil {
+			dialog.ShowError(fmt.Errorf("read 16-byte header: %w", err), win)
+			return
+		}
+		if _, err := io.ReadFull(br, encKikey[:]); err != nil {
+			dialog.ShowError(fmt.Errorf("read kikey: %w", err), win)
+			return
+		}
+		currentHeader = hdr
+
+		// 2) определяем формат и правильно читаем IN/OUT (BE16)
 		isCenter := strings.EqualFold(filepath.Base(keysPath), "center.bin")
 
-		var abcHeader [16]byte
-		var encKikey [qalqan.DEFAULT_KEY_LEN]byte
-
+		var inCnt, outCnt int
 		if isCenter {
-			if _, err := io.ReadFull(br, encKikey[:]); err != nil {
-				dialog.ShowError(fmt.Errorf("read kikey (center): %w", err), win)
-				return
-			}
+			// center.bin: IN [4..5], OUT [6..7]
+			inCnt = int(binary.BigEndian.Uint16(hdr[4:6]))
+			outCnt = int(binary.BigEndian.Uint16(hdr[6:8]))
 		} else {
-			if _, err := io.ReadFull(br, abcHeader[:]); err != nil {
-				dialog.ShowError(fmt.Errorf("read abc header: %w", err), win)
-				return
-			}
-			if _, err := io.ReadFull(br, encKikey[:]); err != nil {
-				dialog.ShowError(fmt.Errorf("read kikey (abc): %w", err), win)
-				return
-			}
+			// abc.bin: IN [1..2], OUT [3..4]
+			inCnt = int(binary.BigEndian.Uint16(hdr[1:3]))
+			outCnt = int(binary.BigEndian.Uint16(hdr[3:5]))
 		}
 
+		// 3) границы [0..8000]
+		if inCnt < 0 {
+			inCnt = 0
+		}
+		if outCnt < 0 {
+			outCnt = 0
+		}
+		if inCnt > 8000 {
+			inCnt = 8000
+		}
+		if outCnt > 8000 {
+			outCnt = 8000
+		}
+
+		// сохранить в глобальные (их использует UI)
+		SkeyInCnt, SkeyOutCnt = inCnt, outCnt
+
+		// 4) раскодировать kikey -> rimitkey и проверить общий IMIT файла
 		key32 := qalqan.Hash512(password)
 		keyHex := hex.EncodeToString(key32[:])
+
 		rKey := make([]byte, qalqan.EXPKLEN)
 		qalqan.Kexp(key32[:], qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rKey)
 
@@ -154,6 +184,7 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 		}
 
 		qalqan.Kexp(kikey, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rimitkey)
+
 		imitstream := bytes.NewBuffer(data)
 		calcImit := make([]byte, qalqan.BLOCKLEN)
 		qalqan.Qalqan_Imit(uint64(len(data)-qalqan.BLOCKLEN), rimitkey, imitstream, calcImit)
@@ -163,22 +194,54 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 		if subtle.ConstantTimeCompare(calcImit, fileImit) != 1 {
-			dialog.ShowInformation(tr("error"), tr("wrong_password"), win)
+			dialog.ShowInformation(tr("error"), tr("file_corrupted"), win)
 			return
 		}
 
-		circle_keys = [100][qalqan.DEFAULT_KEY_LEN]byte{}
-		session_keys = nil
+		// 5) circle-keys: читаем РОВНО 100 штук из текущей позиции буфера
+		const circleCount = 100
+		circle_keys = make([][qalqan.DEFAULT_KEY_LEN]byte, circleCount)
+		if err := qalqan.LoadCircleKeys(br, rKey, &circle_keys, circleCount); err != nil {
+			dialog.ShowError(err, win)
+			return
+		}
 
-		qalqan.LoadCircleKeys(data, br, rKey, &circle_keys)
-		qalqan.LoadSessionKeys(data, br, rKey, &session_keys)
-		session_keys_ro = cloneSessionKeys(session_keys)
+		// 6) посчитать, сколько байтов осталось на сессии (с учётом футера QPWD)
+		rem := br.Len()                    // осталось после рабочих чтений
+		sessBytes := rem - qalqan.BLOCKLEN // минус финальный IMIT
 
+		hasFooter := len(data) >= 2*qalqan.BLOCKLEN &&
+			bytes.Equal(data[len(data)-2*qalqan.BLOCKLEN:len(data)-2*qalqan.BLOCKLEN+4], []byte{'Q', 'P', 'W', 'D'})
+		if hasFooter {
+			sessBytes -= qalqan.BLOCKLEN
+		}
+
+		// 7) определить число пользователей
+		bytesPerUser := (SkeyInCnt + SkeyOutCnt) * qalqan.DEFAULT_KEY_LEN
+		users := 1
+		if isCenter {
+			if bytesPerUser <= 0 || sessBytes < bytesPerUser {
+				dialog.ShowError(fmt.Errorf("bad layout: sessBytes=%d perUser=%d", sessBytes, bytesPerUser), win)
+				return
+			}
+			users = sessBytes / bytesPerUser
+			if users <= 0 || users > 255 {
+				dialog.ShowError(fmt.Errorf("bad layout: users=%d", users), win)
+				return
+			}
+		}
+
+		if err := qalqan.LoadSessionKeysDynamic(br, rKey, &session_keys, SkeyInCnt, SkeyOutCnt, users); err != nil {
+			dialog.ShowError(err, win)
+			return
+		}
+
+		// 9) локальный контекст
 		if isCenter {
 			localUserNumber = 0x33
 			localUserIndex = 0
 		} else {
-			userNum := abcHeader[0]
+			userNum := hdr[0]
 			if userNum == 0 {
 				userNum = 1
 			}
@@ -187,6 +250,10 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 		}
 
 		lastKeyHashHex = keyHex
+		keysFilePath = keysPath
+
+		currentRKey = append([]byte(nil), rKey...)
+		currentPlainKikey = append([]byte(nil), kikey...)
 
 		hasFooter, changed := parseFooter(data)
 		if !hasFooter || !changed {
@@ -197,6 +264,7 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 		InitMainUI(app, win)
 		win.SetFixedSize(false)
 	}
+
 	applyI18nLogin()
 	langSelect.SetSelected(currentLang)
 
