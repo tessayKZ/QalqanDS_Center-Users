@@ -49,12 +49,3 @@ func main() {
 	win.CenterOnScreen()
 	win.ShowAndRun()
 }
-
-/* TODO:
-1. Добавить выбор нескольких файлов для зашифрования в один файл .bin;
-2. Обновить инструкцию пользования QalqanDS
-3. Сделать чтобы Циркулярные и сессионые выбирались по порядку // func useAndDeleteSessionOut(userIdx int, start int) ([]uint8, int) {
-
-0 tgjXqmWmzg
-1 jTeDVqbmZS
-*/

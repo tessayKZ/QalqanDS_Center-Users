@@ -22,6 +22,9 @@ var i18n = map[string]map[string]string{
 		"wrong_password":      "Wrong password",
 		"both_keyfiles_found": "Both center.bin and abc.bin are in the app folder. Please delete one and leave only one.",
 		"no_keyfiles_found":   "Neither center.bin nor abc.bin found in the app folder.",
+		"warning":             "Warning",
+		"keys_expiry_warning": "Your keys expire in %d %s (by %s). Please update the keys in advance.",
+		"keys_expired_error":  "Key validity expired on %s. Update the key file and restart the application.",
 
 		// Main UI
 		"hash_of_key":                  "Hash of Key",
@@ -100,6 +103,9 @@ var i18n = map[string]map[string]string{
 		"wrong_password":      "Пароль неверный",
 		"both_keyfiles_found": "В папке с приложением найдены оба файла: center.bin и abc.bin. Удалите один и оставьте только один.",
 		"no_keyfiles_found":   "В папке приложения не найден ни center.bin, ни abc.bin.",
+		"warning":             "Внимание",
+		"keys_expiry_warning": "До окончания срока действия ключей осталось %d %s (до %s). Пожалуйста, обновите ключи заранее.",
+		"keys_expired_error":  "Срок действия ключей истёк %s. Обновите файл ключей и перезапустите приложение.",
 
 		// Main UI
 		"hash_of_key":                  "Хэш ключа",
@@ -177,6 +183,9 @@ var i18n = map[string]map[string]string{
 		"keys_loaded":         "Кілттер сәтті жүктелді!",
 		"both_keyfiles_found": "Папкада екі файл да табылды: center.bin және abc.bin. Біреуін жою керек, тек біреуін қалдырыңыз.",
 		"no_keyfiles_found":   "Папкада center.bin да, abc.bin да табылмады.",
+		"warning":             "Назар аударыңыз",
+		"keys_expiry_warning": "Кілттердің әрекет ету мерзімінің аяқталуына %d %s қалды (%s дейін). Алдын ала кілттерді жаңартыңыз.",
+		"keys_expired_error":  "Кілттердің әрекет ету мерзімі %s күні аяқталды. Кілт файлын жаңартып, қосымшаны қайта іске қосыңыз.",
 
 		// Main UI
 		"hash_of_key":                  "Кілттің хэші",

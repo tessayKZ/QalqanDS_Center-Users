@@ -164,7 +164,6 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 
 		isCenter := strings.EqualFold(filepath.Base(filePath), "center.bin")
 
-		// Всегда читаем и сохраняем 16-байтовый заголовок
 		var header [16]byte
 		if len(fileData) < 16+qalqan.DEFAULT_KEY_LEN {
 			dialog.ShowError(fmt.Errorf("%s: too short", filepath.Base(filePath)), win)
@@ -176,18 +175,27 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 			headerLen   = 16
 			kikeyLen    = 32
 			circleCount = 100
-			sessPerDir  = 1000
 			key32       = 32
 			footerLen   = qalqan.BLOCKLEN
 			imitLen     = qalqan.BLOCKLEN
 		)
 
+		inCnt := SkeyInCnt
+		outCnt := SkeyOutCnt
+		if inCnt < 0 {
+			inCnt = 0
+		}
+		if outCnt < 0 {
+			outCnt = 0
+		}
+
 		var bodyLen int
 		if isCenter {
-			bodyLen = headerLen + kikeyLen + circleCount*key32 + users*2*sessPerDir*key32
+			bodyLen = headerLen + kikeyLen + circleCount*key32 + users*(inCnt+outCnt)*key32
 		} else {
-			bodyLen = headerLen + kikeyLen + circleCount*key32 + 2*sessPerDir*key32
+			bodyLen = headerLen + kikeyLen + circleCount*key32 + (inCnt+outCnt)*key32
 		}
+
 		total := bodyLen + footerLen + imitLen
 
 		newFile := make([]byte, total)
@@ -213,19 +221,16 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 		if !isCenter {
 			lastUser = 1
 		}
-		// users range for center/abc stays the same
 		for u := firstUser; u < lastUser; u++ {
-			// IN keys (pad with zeros up to 1000)
-			for i := 0; i < sessPerDir; i++ {
+			for i := 0; i < inCnt; i++ {
 				var src [key32]byte
 				if i < len(session_keys[u].In) {
 					src = session_keys[u].In[i]
-				} // else keep zeros
+				}
 				enc32(newFile[off:off+key32], src[:])
 				off += key32
 			}
-			// OUT keys (pad with zeros up to 1000)
-			for i := 0; i < sessPerDir; i++ {
+			for i := 0; i < outCnt; i++ {
 				var src [key32]byte
 				if i < len(session_keys[u].Out) {
 					src = session_keys[u].Out[i]

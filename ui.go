@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,7 +34,7 @@ const (
 
 	MaxPlainSize int64 = 2 * 1024 * 1024 * 1024 // 2Gb
 
-	MaxEncryptedSize int64 = MaxPlainSize + 80 // (serviceinfo + metaImit + IV + fileImit) +16 (возможное выравнивание до 16)
+	MaxEncryptedSize int64 = MaxPlainSize + 80 // (serviceinfo + metaImit + IV + fileImit) +16
 
 	KeysValidityDays = 90
 	KeyValidityDays  = 30
@@ -51,7 +50,6 @@ const (
 var SkeyInCnt int
 var SkeyOutCnt int
 
-// simple progress-aware reader for dialogs
 type progressReader struct {
 	r        io.Reader
 	total    int64
@@ -107,20 +105,16 @@ func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int, tar
 	s[4] = fileTypeCode
 	s[5] = keyType
 
-	// circle index — проверяем по длине среза
 	if circleNo >= 0 && circleNo < len(circle_keys) {
 		s[6] = byte(circleNo)
 	}
 
-	// session index — кладём только если в допустимых пределах
 	if usedIdx >= 0 {
-		// ограничим по максимальному числу сессионных ключей (In/Out)
 		maxIdx := SkeyInCnt
 		if SkeyOutCnt > maxIdx {
 			maxIdx = SkeyOutCnt
 		}
 		if usedIdx < maxIdx {
-			// ВНИМАНИЕ: текущий формат кодирует индекс 11 битами (max 2047)
 			if usedIdx <= 2047 {
 				stored := usedIdx + 1 // 1-based
 				lo8 := byte(stored & 0xFF)
@@ -138,12 +132,11 @@ func decodeSessionIndex(si []byte) int {
 	if len(si) < 9 {
 		return -1
 	}
-	if (si[8] & 0x80) != 0 { // v2
+	if (si[8] & 0x80) != 0 {
 		lo8 := int(si[7])
 		hi3 := int(si[8] & 0x07)
 		return (hi3<<8 | lo8) - 1
 	}
-	// legacy: 10 бит (hi8 в s[7], lo2 в s[8]&0x03)
 	lo2 := int(si[8] & 0x03)
 	hi8 := int(si[7])
 	return (hi8<<2 | lo2) - 1
@@ -175,10 +168,10 @@ func fileTypeDefaultExt(ft byte) string {
 }
 
 func suggestDecryptedNameFromPath(p string, fileType byte) string {
-	b := baseName(p) // "report.pdf.bin"
+	b := baseName(p)
 	name := b
 	if strings.EqualFold(filepath.Ext(b), ".bin") {
-		name = b[:len(b)-len(".bin")] // "report.pdf"
+		name = b[:len(b)-len(".bin")]
 	}
 
 	if filepath.Ext(name) == "" {
@@ -219,6 +212,10 @@ func readKeysExpiryDates(path string, centerMode bool) (keysExp, keyExp time.Tim
 			}
 		}
 		return ke, e, nil
+	}
+
+	if t := unix32LEToTime(hdr[5:9]); !t.IsZero() {
+		return t, time.Time{}, nil
 	}
 
 	startKeys := be16DaysToTime(hdr[5], hdr[6])
@@ -351,6 +348,8 @@ var (
 	keysDatesText   string
 	lastKeyHashHex  string
 	keysExpiryCache time.Time
+	nextOutIdx      []int
+	nextCircleIdx   int
 )
 
 func init() {
@@ -409,30 +408,21 @@ func useAndDeleteCircleKey(circleKeyNumber int) []uint8 {
 }
 
 func pickAnyCircleKey() (int, []byte) {
-	if len(circle_keys) == 0 {
+	n := len(circle_keys)
+	if n == 0 {
 		return -1, nil
 	}
-	allEmpty := true
-	for i := 0; i < len(circle_keys); i++ {
-		if !circleKeyAllZero(&circle_keys[i]) {
-			allEmpty = false
-			break
-		}
-	}
-	if allEmpty {
-		return -1, nil
-	}
-	start := mrand.Intn(len(circle_keys))
-	for i := 0; i < len(circle_keys); i++ {
-		idx := (start + i) % len(circle_keys)
+	for i := 0; i < n; i++ {
+		idx := (nextCircleIdx + i) % n
 		if rk := useAndDeleteCircleKey(idx); rk != nil {
+			nextCircleIdx = (idx + 1) % n
 			return idx, rk
 		}
 	}
 	return -1, nil
 }
 
-func useAndDeleteSessionOut(userIdx int, start int) ([]uint8, int) {
+func useAndDeleteSessionOut(userIdx int, _ int) ([]uint8, int) {
 	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) {
 		return nil, -1
 	}
@@ -440,32 +430,24 @@ func useAndDeleteSessionOut(userIdx int, start int) ([]uint8, int) {
 	if outCnt <= 0 {
 		return nil, -1
 	}
-	if isCenterMode {
-		start = mrand.Intn(outCnt)
-	}
-	idx := start % outCnt
-	found := false
+	start := nextOutIdx[userIdx] % outCnt
 	for i := 0; i < outCnt; i++ {
 		try := (start + i) % outCnt
 		if !sessionKeyAllZero(&session_keys[userIdx].Out[try]) {
-			idx = try
-			found = true
-			break
+			idx := try
+			key := session_keys[userIdx].Out[idx][:]
+			rkey := make([]uint8, qalqan.EXPKLEN)
+			qalqan.Kexp(key, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
+			nextOutIdx[userIdx] = (idx + 1) % outCnt
+			if !isCenterMode {
+				for j := 0; j < qalqan.DEFAULT_KEY_LEN; j++ {
+					session_keys[userIdx].Out[idx][j] = 0
+				}
+			}
+			return rkey, idx
 		}
 	}
-	if !found {
-		return nil, -1
-	}
-	key := session_keys[userIdx].Out[idx][:]
-	rkey := make([]uint8, qalqan.EXPKLEN)
-	qalqan.Kexp(key, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
-
-	if !isCenterMode {
-		for i := 0; i < qalqan.DEFAULT_KEY_LEN; i++ {
-			session_keys[userIdx].Out[idx][i] = 0
-		}
-	}
-	return rkey, idx
+	return nil, -1
 }
 
 func countRemainingSessionOut(userIdx int) int {
@@ -677,7 +659,7 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 	if isCenterMode && len(session_keys) > 0 {
 		opts := make([]string, len(session_keys))
 		for i := range session_keys {
-			opts[i] = strconv.Itoa(i + 1) // "1", "2", ...
+			opts[i] = strconv.Itoa(i + 1)
 		}
 		recipientSelect = widget.NewSelect(opts, func(val string) {
 			if i, err := strconv.Atoi(val); err == nil {
@@ -811,8 +793,8 @@ var (
 
 func formatKeysLeft(uIdx int) string {
 	return fmt.Sprintf(tr("keys_left_inout"),
-		countRemainingSessionIn(uIdx),  // In
-		countRemainingSessionOut(uIdx), // Out
+		countRemainingSessionIn(uIdx),
+		countRemainingSessionOut(uIdx),
 	)
 }
 
@@ -856,7 +838,7 @@ func getModeLabelText() string {
 	if isCenterMode {
 		return tr("mode_center")
 	}
-	return fmt.Sprintf("%s %s", tr("mode_user"), fmt.Sprintf(tr("user_n"), int(localUserNumber)))
+	return fmt.Sprintf("%s %s", tr("mode_user"), fmt.Sprintf(tr("user_n"), int(localUserNumber+1)))
 }
 
 func SetLastKeyHashFromBytes(b []byte) {
@@ -912,7 +894,6 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 					targetIdx = localUserIndex
 				}
 
-				// тип файла
 				ext := strings.ToLower(filepath.Ext(uri.Path()))
 				var fileTypeCode byte
 				switch ext {
@@ -928,7 +909,6 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 					fileTypeCode = FileTypeGeneric
 				}
 
-				// выбор ключа
 				useSession := keyPrefIsSession()
 				rKey, keyTypeByte, circleNo, usedIdx, err := chooseKeyForEncryption(targetIdx, useSession)
 				if err != nil || rKey == nil {
@@ -936,14 +916,12 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 					return
 				}
 
-				// IV
 				iv := make([]byte, qalqan.BLOCKLEN)
 				if _, err := crand.Read(iv); err != nil {
 					uiLog(logs, fmt.Sprintf(tr("iv_generation_error"), err))
 					return
 				}
 
-				// заголовок
 				svc := buildServiceInfo(fileTypeCode, keyTypeByte, circleNo, usedIdx, targetIdx)
 
 				uiProgressStart(tr("encrypting"))
@@ -951,7 +929,6 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 				selPath := uri.Path()
 				selName := uri.Name()
 
-				// шифрование
 				ctBuf := &bytes.Buffer{}
 				pr := &progressReader{
 					r:     bytes.NewReader(data),
@@ -974,7 +951,6 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 				qalqan.Qalqan_Imit(uint64(out.Len()), rimitkey, bytes.NewReader(out.Bytes()), fileImit)
 				out.Write(fileImit)
 
-				// списание использованных ключей и сохранение
 				if !isCenterMode {
 					if useSession && usedIdx >= 0 {
 						runOnMain(func() {
@@ -990,7 +966,6 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 					}
 				}
 
-				// сохранение результата
 				runOnMain(func() {
 					saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
 						if err != nil {
@@ -1103,7 +1078,6 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 				return
 			}
 
-			// общий IMIT
 			calc := make([]byte, qalqan.BLOCKLEN)
 			qalqan.Qalqan_Imit(uint64(len(data)-qalqan.BLOCKLEN), rimitkey, bytes.NewReader(data[:len(data)-qalqan.BLOCKLEN]), calc)
 			rimit := data[len(data)-qalqan.BLOCKLEN:]
@@ -1112,7 +1086,6 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 				return
 			}
 
-			// заголовок + его IMIT
 			serviceinfo := data[:qalqan.BLOCKLEN]
 			storedMetaImit := data[qalqan.BLOCKLEN : 2*qalqan.BLOCKLEN]
 			comp := make([]byte, qalqan.BLOCKLEN)
@@ -1147,12 +1120,9 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 				return
 			}
 
-			uiLog(logs, fmt.Sprintf("svc owner=%d keyType=%02X idx=%d", userNumber, keyType, sessionIndex))
-
-			// выбор ключа
 			var rKey []byte
 			uidx := int(userNumber)
-			if keyType == 0 {
+			if keyType == 0x00 {
 				rKey = useAndDeleteCircleKey(circleKeyNumber)
 			} else {
 				rKey = getSessionKeyExact(uidx, true, sessionIndex)
@@ -1229,6 +1199,7 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 
 					saveDialog.Resize(fyne.NewSize(700, 700))
 					saveDialog.SetFileName(suggestDecryptedNameFromPath(encPath, fileType))
+					saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
 					saveDialog.Show()
 				})
 
@@ -1262,4 +1233,6 @@ func UI_OnKeysLoaded(
 		rimitkey = make([]byte, qalqan.EXPKLEN)
 		copy(rimitkey, imitKey)
 	}
+	nextOutIdx = make([]int, len(session_keys))
+	nextCircleIdx = 0
 }

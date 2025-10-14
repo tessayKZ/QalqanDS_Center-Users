@@ -79,7 +79,6 @@ func Hash512(value string) [32]byte {
 	return hash32
 }
 
-// Загружаем РОВНО count circle-ключей из текущей позиции буфера.
 func LoadCircleKeys(
 	ostream *bytes.Buffer,
 	rKey []byte,

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -113,6 +114,29 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 
 		updateKeysDates(keysPath)
 
+		if !keysExpiryCache.IsZero() {
+			now := time.Now()
+			if !now.Before(keysExpiryCache) {
+				dialog.ShowError(
+					fmt.Errorf(tr("keys_expired_error"), keysExpiryCache.Format("02.01.2006")),
+					win,
+				)
+				return
+			}
+			if keysExpiryCache.Sub(now) <= 14*24*time.Hour {
+				leftDays := int(keysExpiryCache.Sub(now).Hours() / 24)
+				if leftDays < 0 {
+					leftDays = 0
+				}
+				dialog.ShowInformation(
+					tr("warning"),
+					fmt.Sprintf(tr("keys_expiry_warning"),
+						leftDays, daysWord(leftDays), keysExpiryCache.Format("02.01.2006")),
+					win,
+				)
+			}
+		}
+
 		data, err := os.ReadFile(keysPath)
 		if err != nil {
 			dialog.ShowError(fmt.Errorf("can't open %s: %w", keysPath, err), win)
@@ -123,10 +147,8 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 
-		// ... data уже прочитан, проверка длины сделана
 		br := bytes.NewBuffer(data)
 
-		// 1) читаем заголовок и зашифрованный kikey
 		var hdr [16]byte
 		var encKikey [qalqan.DEFAULT_KEY_LEN]byte
 		if _, err := io.ReadFull(br, hdr[:]); err != nil {
@@ -139,21 +161,17 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 		}
 		currentHeader = hdr
 
-		// 2) определяем формат и правильно читаем IN/OUT (BE16)
 		isCenter := strings.EqualFold(filepath.Base(keysPath), "center.bin")
 
 		var inCnt, outCnt int
 		if isCenter {
-			// center.bin: IN [4..5], OUT [6..7]
 			inCnt = int(binary.BigEndian.Uint16(hdr[4:6]))
 			outCnt = int(binary.BigEndian.Uint16(hdr[6:8]))
 		} else {
-			// abc.bin: IN [1..2], OUT [3..4]
 			inCnt = int(binary.BigEndian.Uint16(hdr[1:3]))
 			outCnt = int(binary.BigEndian.Uint16(hdr[3:5]))
 		}
 
-		// 3) границы [0..8000]
 		if inCnt < 0 {
 			inCnt = 0
 		}
@@ -167,10 +185,8 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			outCnt = 8000
 		}
 
-		// сохранить в глобальные (их использует UI)
 		SkeyInCnt, SkeyOutCnt = inCnt, outCnt
 
-		// 4) раскодировать kikey -> rimitkey и проверить общий IMIT файла
 		key32 := qalqan.Hash512(password)
 		keyHex := hex.EncodeToString(key32[:])
 
@@ -198,7 +214,6 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 
-		// 5) circle-keys: читаем РОВНО 100 штук из текущей позиции буфера
 		const circleCount = 100
 		circle_keys = make([][qalqan.DEFAULT_KEY_LEN]byte, circleCount)
 		if err := qalqan.LoadCircleKeys(br, rKey, &circle_keys, circleCount); err != nil {
@@ -206,9 +221,8 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 
-		// 6) посчитать, сколько байтов осталось на сессии (с учётом футера QPWD)
-		rem := br.Len()                    // осталось после рабочих чтений
-		sessBytes := rem - qalqan.BLOCKLEN // минус финальный IMIT
+		rem := br.Len()
+		sessBytes := rem - qalqan.BLOCKLEN
 
 		hasFooter := len(data) >= 2*qalqan.BLOCKLEN &&
 			bytes.Equal(data[len(data)-2*qalqan.BLOCKLEN:len(data)-2*qalqan.BLOCKLEN+4], []byte{'Q', 'P', 'W', 'D'})
@@ -216,7 +230,6 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			sessBytes -= qalqan.BLOCKLEN
 		}
 
-		// 7) определить число пользователей
 		bytesPerUser := (SkeyInCnt + SkeyOutCnt) * qalqan.DEFAULT_KEY_LEN
 		users := 1
 		if isCenter {
@@ -236,7 +249,9 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 
-		// 9) локальный контекст
+		nextOutIdx = make([]int, len(session_keys))
+		nextCircleIdx = 0
+
 		if isCenter {
 			localUserNumber = 0x33
 			localUserIndex = 0
