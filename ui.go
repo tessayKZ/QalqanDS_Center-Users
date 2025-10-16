@@ -34,7 +34,7 @@ const (
 
 	MaxPlainSize int64 = 2 * 1024 * 1024 * 1024 // 2Gb
 
-	MaxEncryptedSize int64 = MaxPlainSize + 80 // (serviceinfo + metaImit + IV + fileImit) +16
+	MaxEncryptedSize int64 = MaxPlainSize + 80 // (serviceinfo + metaImit + IV + fileImit) +16 = 64
 
 	KeysValidityDays = 90
 	KeyValidityDays  = 30
@@ -62,7 +62,6 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	n, err := p.r.Read(b)
 	if n > 0 {
 		p.read += int64(n)
-		// обновляем ~25 раз/сек или при завершении
 		if time.Since(p.lastEmit) > 40*time.Millisecond || p.read == p.total {
 			if p.total > 0 && p.emit != nil {
 				p.emit(float64(p.read) / float64(p.total))
@@ -92,11 +91,11 @@ func SetLocalUserNumber(n int) {
 	localUserNumber = byte(n)
 }
 
-func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int, targetIdx int) [qalqan.BLOCKLEN]byte {
+func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int) [qalqan.BLOCKLEN]byte {
 	var s [qalqan.BLOCKLEN]byte
 	s[0] = 0x00
 	if isCenterMode {
-		s[1] = byte(targetIdx + 1) // адресат для центра
+		s[1] = 0x33 // метка Центра
 	} else {
 		s[1] = byte(localUserNumber) // номер отправителя (1..N)
 	}
@@ -109,20 +108,9 @@ func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int, tar
 		s[6] = byte(circleNo)
 	}
 
-	if usedIdx >= 0 {
-		maxIdx := SkeyInCnt
-		if SkeyOutCnt > maxIdx {
-			maxIdx = SkeyOutCnt
-		}
-		if usedIdx < maxIdx {
-			if usedIdx <= 2047 {
-				stored := usedIdx + 1 // 1-based
-				lo8 := byte(stored & 0xFF)
-				hi3 := byte((stored >> 8) & 0x07)
-				s[7] = lo8
-				s[8] = (s[8] &^ 0x87) | hi3 | 0x80
-			}
-		}
+	if usedIdx >= 0 && usedIdx <= 999 {
+		s[7] = byte(usedIdx >> 8)
+		s[8] = byte(usedIdx)
 	}
 	// [9..15] = 0
 	return s
@@ -132,14 +120,17 @@ func decodeSessionIndex(si []byte) int {
 	if len(si) < 9 {
 		return -1
 	}
-	if (si[8] & 0x80) != 0 {
-		lo8 := int(si[7])
-		hi3 := int(si[8] & 0x07)
-		return (hi3<<8 | lo8) - 1
+
+	//lo8 := int(si[8])
+	//hi3 := int(si[7] & 0x07)
+	nBE := int(si[7])<<8 | int(si[8])
+	return (nBE - 1)
+
+	/*if (si[8] & 0x80) != 0 {
 	}
-	lo2 := int(si[8] & 0x03)
-	hi8 := int(si[7])
-	return (hi8<<2 | lo2) - 1
+	lo8 := int(si[7])
+	hi2 := int(si[8] & 0x03)
+	return (hi2 << 8) | lo8*/
 }
 
 func keyPrefIsSession() bool { return keyPref == KeyPrefSession }
@@ -309,34 +300,6 @@ func updateKeysDates(keysPath string) {
 	}
 }
 
-func getSessionKeyExact(userIdx int, in bool, idx int) []byte {
-	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) || idx < 0 {
-		return nil
-	}
-	if in {
-		if idx >= len(session_keys[userIdx].In) {
-			return nil
-		}
-		key := &session_keys[userIdx].In[idx]
-		if sessionKeyAllZero(key) {
-			return nil
-		}
-		rkey := make([]uint8, qalqan.EXPKLEN)
-		qalqan.Kexp(key[:], qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
-		return rkey
-	}
-	if idx >= len(session_keys[userIdx].Out) {
-		return nil
-	}
-	key := &session_keys[userIdx].Out[idx]
-	if sessionKeyAllZero(key) {
-		return nil
-	}
-	rkey := make([]uint8, qalqan.EXPKLEN)
-	qalqan.Kexp(key[:], qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
-	return rkey
-}
-
 var (
 	isCenterMode    bool
 	session_keys    []qalqan.SessionKeySet
@@ -399,11 +362,6 @@ func useAndDeleteCircleKey(circleKeyNumber int) []uint8 {
 	rkey := make([]uint8, qalqan.EXPKLEN)
 	qalqan.Kexp(key, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
 
-	if !isCenterMode {
-		for i := 0; i < qalqan.DEFAULT_KEY_LEN; i++ {
-			circle_keys[circleKeyNumber][i] = 0
-		}
-	}
 	return rkey
 }
 
@@ -422,6 +380,31 @@ func pickAnyCircleKey() (int, []byte) {
 	return -1, nil
 }
 
+func useAndDeleteSessionIn(userIdx, idx int) ([]uint8, int) {
+	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) {
+		return nil, -1
+	}
+	inCnt := len(session_keys[userIdx].In)
+	if idx < 0 || idx >= inCnt {
+		return nil, -1
+	}
+	if sessionKeyAllZero(&session_keys[userIdx].In[idx]) {
+		return nil, -1
+	}
+
+	raw := session_keys[userIdx].In[idx][:]
+	rkey := make([]uint8, qalqan.EXPKLEN)
+	qalqan.Kexp(raw, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
+
+	for j := 0; j < qalqan.DEFAULT_KEY_LEN; j++ {
+		session_keys[userIdx].In[idx][j] = 0
+	}
+	if isCenterMode {
+		_ = writeCurrentKeysFile()
+	}
+	return rkey, idx
+}
+
 func useAndDeleteSessionOut(userIdx int, _ int) ([]uint8, int) {
 	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) {
 		return nil, -1
@@ -430,19 +413,24 @@ func useAndDeleteSessionOut(userIdx int, _ int) ([]uint8, int) {
 	if outCnt <= 0 {
 		return nil, -1
 	}
-	start := nextOutIdx[userIdx] % outCnt
-	for i := 0; i < outCnt; i++ {
-		try := (start + i) % outCnt
-		if !sessionKeyAllZero(&session_keys[userIdx].Out[try]) {
-			idx := try
-			key := session_keys[userIdx].Out[idx][:]
+
+	for idx := 0; idx < outCnt; idx++ {
+		if !sessionKeyAllZero(&session_keys[userIdx].Out[idx]) {
+			raw := session_keys[userIdx].Out[idx][:]
 			rkey := make([]uint8, qalqan.EXPKLEN)
-			qalqan.Kexp(key, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
-			nextOutIdx[userIdx] = (idx + 1) % outCnt
-			if !isCenterMode {
-				for j := 0; j < qalqan.DEFAULT_KEY_LEN; j++ {
-					session_keys[userIdx].Out[idx][j] = 0
-				}
+			qalqan.Kexp(raw, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
+
+			for j := 0; j < qalqan.DEFAULT_KEY_LEN; j++ {
+				session_keys[userIdx].Out[idx][j] = 0
+			}
+
+			nextOutIdx[userIdx] = idx + 1
+			if nextOutIdx[userIdx] >= outCnt {
+				nextOutIdx[userIdx] = 0
+			}
+
+			if isCenterMode {
+				_ = writeCurrentKeysFile()
 			}
 			return rkey, idx
 		}
@@ -922,7 +910,7 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 					return
 				}
 
-				svc := buildServiceInfo(fileTypeCode, keyTypeByte, circleNo, usedIdx, targetIdx)
+				svc := buildServiceInfo(fileTypeCode, keyTypeByte, circleNo, usedIdx+1)
 
 				uiProgressStart(tr("encrypting"))
 
@@ -959,9 +947,6 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 								recipientSelect.SetSelected(strconv.Itoa(targetIdx + 1))
 							}
 						})
-						persistKeysToDiskAsync(logs)
-					}
-					if !useSession {
 						persistKeysToDiskAsync(logs)
 					}
 				}
@@ -1121,11 +1106,26 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 			}
 
 			var rKey []byte
-			uidx := int(userNumber)
+			var uidx int
+			if isCenterMode {
+				if userNumber > 0 {
+					uidx = int(userNumber)
+				} else {
+					uidx = 0
+				}
+			} else {
+				uidx = localUserIndex
+			}
+
 			if keyType == 0x00 {
 				rKey = useAndDeleteCircleKey(circleKeyNumber)
 			} else {
-				rKey = getSessionKeyExact(uidx, true, sessionIndex)
+				rKey, _ = useAndDeleteSessionIn(uidx, sessionIndex)
+			}
+
+			if rKey == nil {
+				uiLog(logs, tr("decryption_key_not_available"))
+				return
 			}
 
 			uiProgressStart(tr("decrypting"))
@@ -1199,7 +1199,7 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 
 					saveDialog.Resize(fyne.NewSize(700, 700))
 					saveDialog.SetFileName(suggestDecryptedNameFromPath(encPath, fileType))
-					saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
+					saveDialog.SetFilter(nil)
 					saveDialog.Show()
 				})
 

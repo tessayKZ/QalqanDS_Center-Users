@@ -34,14 +34,14 @@ func writeCurrentKeysFile() error {
 	}
 
 	const (
-		kikeyLen   = 32
-		circleCnt  = 100
-		key32      = 32
-		imitLen    = qalqan.BLOCKLEN
-		footerLen  = qalqan.BLOCKLEN
+		kikeyLen  = 32
+		circleCnt = 100
+		key32     = 32
+		imitLen   = qalqan.BLOCKLEN
+		footerLen = qalqan.BLOCKLEN
 	)
 
-	var sessIn  = SkeyInCnt
+	var sessIn = SkeyInCnt
 	var sessOut = SkeyOutCnt
 
 	users := len(session_keys)
@@ -52,9 +52,9 @@ func writeCurrentKeysFile() error {
 	var bodyLen int
 
 	if isCenter {
-		bodyLen = headerLen + kikeyLen + circleCnt*key32 + users*2*sessOut*key32
+		bodyLen = headerLen + kikeyLen + circleCnt*key32 + users*(sessIn+sessOut)*key32
 	} else {
-		bodyLen = headerLen + kikeyLen + circleCnt*key32 + 2*sessOut*key32
+		bodyLen = headerLen + kikeyLen + circleCnt*key32 + (sessIn+sessOut)*key32
 	}
 	total := bodyLen + imitLen
 	if hasFooter {
@@ -64,8 +64,8 @@ func writeCurrentKeysFile() error {
 	newFile := make([]byte, total)
 	off := 0
 
-copy(newFile[off:off+headerLen], currentHeader[:])
-off += headerLen
+	copy(newFile[off:off+headerLen], currentHeader[:])
+	off += headerLen
 
 	encKikey := make([]byte, kikeyLen)
 	qalqan.Encrypt(currentPlainKikey[0:16], currentRKey, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, encKikey[0:16])
@@ -87,15 +87,27 @@ off += headerLen
 	if !isCenter {
 		lastUser = 1
 	}
-for u := firstUser; u < lastUser; u++ {
-    if isCenter {
-        for i := 0; i < sessOut; i++ { enc32(newFile[off:off+key32], session_keys[u].Out[i][:]); off += key32 }
-        for i := 0; i < sessIn;  i++ { enc32(newFile[off:off+key32], session_keys[u].In[i][:]);  off += key32 }
-    } else {
-        for i := 0; i < sessIn;  i++ { enc32(newFile[off:off+key32], session_keys[u].In[i][:]);  off += key32 }
-        for i := 0; i < sessOut; i++ { enc32(newFile[off:off+key32], session_keys[u].Out[i][:]); off += key32 }
-    }
-}
+	for u := firstUser; u < lastUser; u++ {
+		if isCenter {
+			for i := 0; i < sessOut; i++ {
+				enc32(newFile[off:off+key32], session_keys[u].Out[i][:])
+				off += key32
+			}
+			for i := 0; i < sessIn; i++ {
+				enc32(newFile[off:off+key32], session_keys[u].In[i][:])
+				off += key32
+			}
+		} else {
+			for i := 0; i < sessIn; i++ {
+				enc32(newFile[off:off+key32], session_keys[u].In[i][:])
+				off += key32
+			}
+			for i := 0; i < sessOut; i++ {
+				enc32(newFile[off:off+key32], session_keys[u].Out[i][:])
+				off += key32
+			}
+		}
+	}
 
 	if hasFooter {
 		copy(newFile[off:off+footerLen], footer[:])
