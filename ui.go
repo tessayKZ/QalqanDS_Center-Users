@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -351,7 +352,7 @@ func circleKeyAllZero(k *[qalqan.DEFAULT_KEY_LEN]byte) bool {
 	return true
 }
 
-func useAndDeleteCircleKey(circleKeyNumber int) []uint8 {
+func useCircleKey(circleKeyNumber int) []uint8 {
 	if circleKeyNumber < 0 || circleKeyNumber >= len(circle_keys) {
 		return nil
 	}
@@ -370,11 +371,37 @@ func pickAnyCircleKey() (int, []byte) {
 	if n == 0 {
 		return -1, nil
 	}
+
+	available := make([]int, 0, n)
 	for i := 0; i < n; i++ {
-		idx := (nextCircleIdx + i) % n
-		if rk := useAndDeleteCircleKey(idx); rk != nil {
+		if !circleKeyAllZero(&circle_keys[i]) {
+			available = append(available, i)
+		}
+	}
+	if len(available) == 0 {
+		return -1, nil
+	}
+
+	r, err := crand.Int(crand.Reader, big.NewInt(int64(len(available))))
+	if err != nil {
+		idx := available[0]
+		if rk := useCircleKey(idx); rk != nil {
 			nextCircleIdx = (idx + 1) % n
 			return idx, rk
+		}
+		return -1, nil
+	}
+
+	idx := available[r.Int64()]
+	if rk := useCircleKey(idx); rk != nil {
+		nextCircleIdx = (idx + 1) % n
+		return idx, rk
+	}
+
+	for _, j := range available {
+		if rk := useCircleKey(j); rk != nil {
+			nextCircleIdx = (j + 1) % n
+			return j, rk
 		}
 	}
 	return -1, nil
@@ -1118,7 +1145,7 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 			}
 
 			if keyType == 0x00 {
-				rKey = useAndDeleteCircleKey(circleKeyNumber)
+				rKey = useCircleKey(circleKeyNumber)
 			} else {
 				rKey, _ = useAndDeleteSessionIn(uidx, sessionIndex)
 			}
