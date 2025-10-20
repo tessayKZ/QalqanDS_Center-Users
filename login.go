@@ -285,6 +285,7 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 		runOnMain(func() {
 			InitMainUI(app, win)
 			win.SetFixedSize(false)
+			win.Resize(fyne.NewSize(860, 560))
 			win.CenterOnScreen()
 		})
 	}

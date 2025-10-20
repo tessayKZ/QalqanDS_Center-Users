@@ -112,8 +112,10 @@ func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int) [qa
 	if usedIdx > 0 && usedIdx <= 0xFFFF {
 		s[7] = byte(usedIdx >> 8)
 		s[8] = byte(usedIdx)
+		//s[9] = 0x88 multi encrypt files
+
 	}
-	// [9..15] = 0
+	// [10..15] = 0
 	return s
 }
 
@@ -764,6 +766,7 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 	content := container.NewStack(bgImage, container.NewPadded(mainUI))
 
 	win.SetContent(content)
+	win.Resize(fyne.NewSize(860, 560))
 	win.CenterOnScreen()
 
 	selectedLanguage.SetSelected(currentLang)
@@ -869,151 +872,197 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 			return
 		}
 
-		fileDialog := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
-			if err != nil {
-				addLog(logs, fmt.Sprintf(tr("open_error"), err))
-				return
-			}
-			if reader == nil {
-				return
-			}
+		var chooser *dialog.CustomDialog
+		sub := widget.NewLabelWithStyle(tr("encrypt_choose_mode"), fyne.TextAlignCenter, fyne.TextStyle{})
 
-			uri := reader.URI()
+		oneIcon := iconFrom("assets/onefile.png", theme.ConfirmIcon())
+		multiIcon := iconFrom("assets/multifile.png", theme.FolderOpenIcon())
 
-			go func(reader fyne.URIReadCloser, uri fyne.URI) {
-				defer reader.Close()
+		oneBtn := widget.NewButtonWithIcon(tr("one_file"), oneIcon, func() {
+			chooser.Hide()
+			openSingleFileEncryptFlow(win, logs, keysLeft)
+		})
+		multiBtn := widget.NewButtonWithIcon(tr("several_files"), multiIcon, func() {
+			chooser.Hide()
+			ShowMultiEncryptWindow(win, logs, keysLeft)
+		})
 
-				lr := &io.LimitedReader{R: reader, N: MaxPlainSize + 1}
-				data, err := io.ReadAll(lr)
-				if err != nil {
-					uiLog(logs, fmt.Sprintf(tr("read_error"), err))
-					return
-				}
-				if int64(len(data)) > MaxPlainSize || lr.N == 0 {
-					runOnMain(func() { dialog.ShowError(fmt.Errorf(tr("file_too_big")), win) })
-					return
-				}
+		oneWrap := container.NewGridWrap(fyne.NewSize(220, 40), oneBtn)
+		multiWrap := container.NewGridWrap(fyne.NewSize(220, 40), multiBtn)
 
-				targetIdx := selectedUserIdx
-				if !isCenterMode {
-					targetIdx = localUserIndex
-				}
+		bg := canvas.NewImageFromFile("assets/background.png")
+		bg.FillMode = canvas.ImageFillStretch
 
-				ext := strings.ToLower(filepath.Ext(uri.Path()))
-				var fileTypeCode byte
-				switch ext {
-				case ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff":
-					fileTypeCode = FileTypePhoto
-				case ".txt", ".md", ".log", ".csv":
-					fileTypeCode = FileTypeText
-				case ".mp3", ".wav", ".ogg", ".m4a", ".flac":
-					fileTypeCode = FileTypeAudio
-				case ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v":
-					fileTypeCode = FileTypeVideo
-				default:
-					fileTypeCode = FileTypeGeneric
-				}
+		buttonsRow := container.NewHBox(
+			layout.NewSpacer(),
+			oneWrap,
+			widget.NewLabel(" "),
+			multiWrap,
+			layout.NewSpacer(),
+		)
 
-				useSession := keyPrefIsSession()
-				rKey, keyTypeByte, circleNo, usedIdx, err := chooseKeyForEncryption(targetIdx, useSession)
-				if err != nil || rKey == nil {
-					runOnMain(func() { dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win) })
-					return
-				}
+		inner := container.NewVBox(
+			widget.NewLabel(" "),
+			sub,
+			widget.NewLabel(" "),
+			buttonsRow,
+			widget.NewLabel(" "),
+		)
 
-				iv := make([]byte, qalqan.BLOCKLEN)
-				if _, err := crand.Read(iv); err != nil {
-					uiLog(logs, fmt.Sprintf(tr("iv_generation_error"), err))
-					return
-				}
+		content := container.NewStack(
+			bg,
+			container.NewPadded(inner),
+		)
 
-				svc := buildServiceInfo(fileTypeCode, keyTypeByte, circleNo, usedIdx+1)
-
-				uiProgressStart(tr("encrypting"))
-
-				selPath := uri.Path()
-				selName := uri.Name()
-
-				ctBuf := &bytes.Buffer{}
-				pr := &progressReader{
-					r:     bytes.NewReader(data),
-					total: int64(len(data)),
-					emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
-				}
-				qalqan.EncryptOFB_File(len(data), rKey, iv, pr, ctBuf)
-
-				out := &bytes.Buffer{}
-				out.Write(svc[:])
-
-				meta := make([]byte, qalqan.BLOCKLEN)
-				qalqan.Qalqan_Imit(uint64(qalqan.BLOCKLEN), rimitkey, bytes.NewReader(svc[:]), meta)
-				out.Write(meta)
-
-				out.Write(iv)
-				out.Write(ctBuf.Bytes())
-
-				fileImit := make([]byte, qalqan.BLOCKLEN)
-				qalqan.Qalqan_Imit(uint64(out.Len()), rimitkey, bytes.NewReader(out.Bytes()), fileImit)
-				out.Write(fileImit)
-
-				if useSession && usedIdx >= 0 {
-					runOnMain(func() {
-						keysLeft.SetText(formatKeysLeft(targetIdx))
-					})
-					persistKeysToDiskAsync(logs)
-				}
-
-				runOnMain(func() {
-					saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
-						if err != nil {
-							addLog(logs, fmt.Sprintf(tr("save_error"), err))
-							return
-						}
-						if writer == nil {
-							return
-						}
-
-						go func() {
-							defer writer.Close()
-							data := out.Bytes()
-							const chunk = 8 << 20 // 8MB
-							for off := 0; off < len(data); off += chunk {
-								end := off + chunk
-								if end > len(data) {
-									end = len(data)
-								}
-								if _, werr := writer.Write(data[off:end]); werr != nil {
-									runOnMain(func() {
-										addLog(logs, fmt.Sprintf(tr("write_error"), werr))
-										uiProgressDone()
-									})
-									return
-								}
-								runOnMain(func() { uiProgressSet(float64(end) / float64(len(data))) })
-							}
-							runOnMain(func() {
-								uiProgressDone()
-								addLog(logs, tr("encrypt_saved_ok"))
-							})
-						}()
-					}, win)
-
-					base := selPath
-					if strings.TrimSpace(base) == "" {
-						base = baseName(selName)
-					}
-					saveDialog.Resize(fyne.NewSize(700, 700))
-					saveDialog.SetFileName(suggestEncryptedNameFromPath(base))
-					saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
-					saveDialog.Show()
-				})
-			}(reader, uri)
-		}, win)
-
-		fileDialog.Resize(fyne.NewSize(700, 700))
-		fileDialog.Show()
+		chooser = dialog.NewCustom(tr("encrypt"), tr("close"), content, win)
+		chooser.Resize(fyne.NewSize(520, 240))
+		chooser.Show()
 	})
 	return btn
+}
+
+func openSingleFileEncryptFlow(win fyne.Window, logs *widget.RichText, keysLeft *widget.Label) {
+	fileDialog := dialog.NewFileOpen(func(reader fyne.URIReadCloser, err error) {
+		if err != nil {
+			addLog(logs, fmt.Sprintf(tr("open_error"), err))
+			return
+		}
+		if reader == nil {
+			return
+		}
+
+		uri := reader.URI()
+
+		go func(reader fyne.URIReadCloser, uri fyne.URI) {
+			defer reader.Close()
+
+			lr := &io.LimitedReader{R: reader, N: MaxPlainSize + 1}
+			data, err := io.ReadAll(lr)
+			if err != nil {
+				uiLog(logs, fmt.Sprintf(tr("read_error"), err))
+				return
+			}
+			if int64(len(data)) > MaxPlainSize || lr.N == 0 {
+				runOnMain(func() { dialog.ShowError(fmt.Errorf(tr("file_too_big")), win) })
+				return
+			}
+
+			targetIdx := selectedUserIdx
+			if !isCenterMode {
+				targetIdx = localUserIndex
+			}
+
+			ext := strings.ToLower(filepath.Ext(uri.Path()))
+			var fileTypeCode byte
+			switch ext {
+			case ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff":
+				fileTypeCode = FileTypePhoto
+			case ".txt", ".md", ".log", ".csv":
+				fileTypeCode = FileTypeText
+			case ".mp3", ".wav", ".ogg", ".m4a", ".flac":
+				fileTypeCode = FileTypeAudio
+			case ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".flv", ".webm", ".m4v":
+				fileTypeCode = FileTypeVideo
+			default:
+				fileTypeCode = FileTypeGeneric
+			}
+
+			useSession := keyPrefIsSession()
+			rKey, keyTypeByte, circleNo, usedIdx, err := chooseKeyForEncryption(targetIdx, useSession)
+			if err != nil || rKey == nil {
+				runOnMain(func() { dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win) })
+				return
+			}
+
+			iv := make([]byte, qalqan.BLOCKLEN)
+			if _, err := crand.Read(iv); err != nil {
+				uiLog(logs, fmt.Sprintf(tr("iv_generation_error"), err))
+				return
+			}
+
+			svc := buildServiceInfo(fileTypeCode, keyTypeByte, circleNo, usedIdx+1)
+
+			uiProgressStart(tr("encrypting"))
+
+			selPath := uri.Path()
+			selName := uri.Name()
+
+			ctBuf := &bytes.Buffer{}
+			pr := &progressReader{
+				r:     bytes.NewReader(data),
+				total: int64(len(data)),
+				emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
+			}
+			qalqan.EncryptOFB_File(len(data), rKey, iv, pr, ctBuf)
+
+			out := &bytes.Buffer{}
+			out.Write(svc[:])
+
+			meta := make([]byte, qalqan.BLOCKLEN)
+			qalqan.Qalqan_Imit(uint64(qalqan.BLOCKLEN), rimitkey, bytes.NewReader(svc[:]), meta)
+			out.Write(meta)
+
+			out.Write(iv)
+			out.Write(ctBuf.Bytes())
+
+			fileImit := make([]byte, qalqan.BLOCKLEN)
+			qalqan.Qalqan_Imit(uint64(out.Len()), rimitkey, bytes.NewReader(out.Bytes()), fileImit)
+			out.Write(fileImit)
+
+			if useSession && usedIdx >= 0 {
+				runOnMain(func() { keysLeft.SetText(formatKeysLeft(targetIdx)) })
+				persistKeysToDiskAsync(logs)
+			}
+
+			runOnMain(func() {
+				saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
+					if err != nil {
+						addLog(logs, fmt.Sprintf(tr("save_error"), err))
+						return
+					}
+					if writer == nil {
+						return
+					}
+
+					go func() {
+						defer writer.Close()
+						data := out.Bytes()
+						const chunk = 8 << 20 // 8MB
+						for off := 0; off < len(data); off += chunk {
+							end := off + chunk
+							if end > len(data) {
+								end = len(data)
+							}
+							if _, werr := writer.Write(data[off:end]); werr != nil {
+								runOnMain(func() {
+									addLog(logs, fmt.Sprintf(tr("write_error"), werr))
+									uiProgressDone()
+								})
+								return
+							}
+							runOnMain(func() { uiProgressSet(float64(end) / float64(len(data))) })
+						}
+						runOnMain(func() {
+							uiProgressDone()
+							addLog(logs, tr("encrypt_saved_ok"))
+						})
+					}()
+				}, win)
+
+				base := selPath
+				if strings.TrimSpace(base) == "" {
+					base = baseName(selName)
+				}
+				saveDialog.Resize(fyne.NewSize(700, 700))
+				saveDialog.SetFileName(suggestEncryptedNameFromPath(base))
+				saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
+				saveDialog.Show()
+			})
+		}(reader, uri)
+	}, win)
+
+	fileDialog.Resize(fyne.NewSize(700, 700))
+	fileDialog.Show()
 }
 
 func rimitkeyAllZero() bool {
@@ -1162,87 +1211,104 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 				persistKeysToDiskAsync(logs)
 			}
 
-			uiProgressStart(tr("decrypting"))
-
-			go func(encPath string, ct, iv, rKey []byte, fileType byte) {
-				defer func() {
-					if r := recover(); r != nil {
-						uiLog(logs, fmt.Sprintf("panic (decrypt): %v", r))
+			if isMultiArchiveFlag(serviceinfo) {
+				folderDlg := dialog.NewFolderOpen(func(list fyne.ListableURI, err error) {
+					if err != nil || list == nil {
+						return
 					}
-				}()
+					dest := list.Path()
+					if strings.TrimSpace(dest) == "" {
+						return
+					}
 
-				out := &bytes.Buffer{}
-				pr := &progressReader{
-					r:     bytes.NewReader(ct),
-					total: int64(len(ct)),
-					emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
-				}
-				if err := qalqan.DecryptOFB_File(len(ct), rKey, iv, pr, out); err != nil {
-					runOnMain(func() { uiProgressDone() })
-					uiLog(logs, fmt.Sprintf(tr("decrypt_error"), err))
-					return
-				}
-				plain := out.Bytes()
+					go func(dest string, ct, iv, rKey []byte) {
+						runOnMain(func() { uiProgressStart(tr("decrypting")) })
 
-				runOnMain(func() { uiProgressDone() })
-
-				runOnMain(func() {
-					saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
-						if err != nil {
-							addLog(logs, fmt.Sprintf(tr("save_error"), err))
-							return
+						pr := &progressReader{
+							r:     bytes.NewReader(ct),
+							total: int64(len(ct)),
+							emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
 						}
-						if writer == nil {
-							return
-						}
+
+						rp, wp := io.Pipe()
+						done := make(chan error, 1)
 
 						go func() {
-							defer writer.Close()
-
-							uiProgressStart(tr("saving"))
-
-							const chunk = 8 << 20 // 8MB
-							lastUpdate := time.Now()
-
-							for off := 0; off < len(plain); off += chunk {
-								end := off + chunk
-								if end > len(plain) {
-									end = len(plain)
-								}
-								if _, werr := writer.Write(plain[off:end]); werr != nil {
-									runOnMain(func() {
-										addLog(logs, fmt.Sprintf(tr("write_error"), werr))
-										uiProgressDone()
-									})
-									return
-								}
-								if time.Since(lastUpdate) >= 60*time.Millisecond || end == len(plain) {
-									prog := float64(end) / float64(len(plain))
-									runOnMain(func() { uiProgressSet(prog) })
-									lastUpdate = time.Now()
-								}
-							}
-
-							runOnMain(func() {
-								addLog(logs, tr("decrypt_saved_ok"))
-								uiProgressDone()
-							})
+							done <- unpackQpkg(rp, dest)
 						}()
-					}, win)
 
-					saveDialog.Resize(fyne.NewSize(700, 700))
-					saveDialog.SetFileName(suggestDecryptedNameFromPath(encPath, fileType))
-					saveDialog.SetFilter(nil)
-					saveDialog.Show()
-				})
+						if err := qalqan.DecryptOFB_File(len(ct), rKey, iv, pr, wp); err != nil {
+							wp.Close()
+							uiLog(logs, fmt.Sprintf(tr("decrypt_error"), err))
+							return
+						}
+						wp.Close()
 
-			}(
-				uri.Path(),
-				append([]byte(nil), ct...),
-				append([]byte(nil), iv...),
-				append([]byte(nil), rKey...),
-				fileType,
-			)
+						if err := <-done; err != nil {
+							uiLog(logs, fmt.Sprintf("unpack error: %v", err))
+							runOnMain(func() { uiProgressDone() })
+							return
+						}
+
+						runOnMain(func() {
+							uiProgressDone()
+							addLog(logs, tr("decrypt_saved_ok"))
+						})
+					}(
+						dest,
+						append([]byte(nil), ct...),
+						append([]byte(nil), iv...),
+						append([]byte(nil), rKey...),
+					)
+				}, win)
+
+				folderDlg.Resize(fyne.NewSize(700, 700))
+				folderDlg.Show()
+				return
+			}
+
+			runOnMain(func() {
+				saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
+					if err != nil {
+						addLog(logs, fmt.Sprintf(tr("save_error"), err))
+						return
+					}
+					if writer == nil {
+						return
+					}
+
+					go func() {
+						defer writer.Close()
+
+						uiProgressStart(tr("decrypting"))
+
+						pr := &progressReader{
+							r:     bytes.NewReader(ct),
+							total: int64(len(ct)),
+							emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
+						}
+						if err := qalqan.DecryptOFB_File(len(ct), rKey, iv, pr, writer); err != nil {
+							runOnMain(func() {
+								uiProgressDone()
+								addLog(logs, fmt.Sprintf(tr("decrypt_error"), err))
+							})
+							return
+						}
+
+						runOnMain(func() {
+							uiProgressDone()
+							addLog(logs, tr("decrypt_saved_ok"))
+						})
+					}()
+				}, win)
+
+				safeName := sanitizeFileName(suggestDecryptedNameFromPath(uri.Path(), fileType))
+
+				saveDialog.Resize(fyne.NewSize(700, 700))
+				saveDialog.SetFileName(safeName)
+				saveDialog.SetFilter(nil)
+				saveDialog.Show()
+			})
 		}, win)
 
 		fileDialog.Resize(fyne.NewSize(700, 700))
