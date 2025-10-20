@@ -217,33 +217,45 @@ func ShowChangePassword(app fyne.App, parent fyne.Window, filePath string, fileD
 			off += key32
 		}
 
-        if isCenter {
-            for u := 0; u < users; u++ {
-                for i := 0; i < outCnt; i++ {
-                    var src [key32]byte
-                    if i < len(session_keys[u].Out) { src = session_keys[u].Out[i] }
-                    enc32(newFile[off:off+key32], src[:]); off += key32
-                }
-                for i := 0; i < inCnt; i++ {
-                    var src [key32]byte
-                    if i < len(session_keys[u].In) { src = session_keys[u].In[i] }
-                    enc32(newFile[off:off+key32], src[:]); off += key32
-                }
-            }
-        } else {
-            for u := 0; u < 1; u++ {
-                for i := 0; i < inCnt; i++ {
-                    var src [key32]byte
-                    if i < len(session_keys[u].In) { src = session_keys[u].In[i] }
-                    enc32(newFile[off:off+key32], src[:]); off += key32
-                }
-                for i := 0; i < outCnt; i++ {
-                    var src [key32]byte
-                    if i < len(session_keys[u].Out) { src = session_keys[u].Out[i] }
-                    enc32(newFile[off:off+key32], src[:]); off += key32
-                }
-            }
-        }
+		if isCenter {
+			for u := 0; u < users; u++ {
+				for i := 0; i < inCnt; i++ {
+					var src [key32]byte
+					if i < len(session_keys[u].In) {
+						src = session_keys[u].In[i]
+					}
+					enc32(newFile[off:off+key32], src[:])
+					off += key32
+				}
+				for i := 0; i < outCnt; i++ {
+					var src [key32]byte
+					if i < len(session_keys[u].Out) {
+						src = session_keys[u].Out[i]
+					}
+					enc32(newFile[off:off+key32], src[:])
+					off += key32
+				}
+			}
+		} else {
+			for u := 0; u < 1; u++ {
+				for i := 0; i < inCnt; i++ {
+					var src [key32]byte
+					if i < len(session_keys[u].In) {
+						src = session_keys[u].In[i]
+					}
+					enc32(newFile[off:off+key32], src[:])
+					off += key32
+				}
+				for i := 0; i < outCnt; i++ {
+					var src [key32]byte
+					if i < len(session_keys[u].Out) {
+						src = session_keys[u].Out[i]
+					}
+					enc32(newFile[off:off+key32], src[:])
+					off += key32
+				}
+			}
+		}
 
 		if off != bodyLen {
 			dialog.ShowError(fmt.Errorf("size mismatch: wrote %d, expected %d", off, bodyLen), win)

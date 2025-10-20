@@ -417,9 +417,6 @@ func useAndDeleteSessionIn(userIdx, idx int) ([]uint8, int) {
 	for j := 0; j < qalqan.DEFAULT_KEY_LEN; j++ {
 		session_keys[userIdx].In[idx][j] = 0
 	}
-	if isCenterMode {
-		_ = writeCurrentKeysFile()
-	}
 	return rkey, idx
 }
 
@@ -958,13 +955,11 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 				qalqan.Qalqan_Imit(uint64(out.Len()), rimitkey, bytes.NewReader(out.Bytes()), fileImit)
 				out.Write(fileImit)
 
-				if !isCenterMode {
-					if useSession && usedIdx >= 0 {
-						runOnMain(func() {
-							keysLeft.SetText(formatKeysLeft(targetIdx))
-						})
-						persistKeysToDiskAsync(logs)
-					}
+				if useSession && usedIdx >= 0 {
+					runOnMain(func() {
+						keysLeft.SetText(formatKeysLeft(targetIdx))
+					})
+					persistKeysToDiskAsync(logs)
 				}
 
 				runOnMain(func() {
@@ -1123,14 +1118,15 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 
 			var rKey []byte
 			var uidx int
+
 			if isCenterMode {
 				if userNumber == 0x33 {
-					uiLog(logs, "Этот файл зашифрован в режиме Центра и должен расшифровываться у адресата (пользователя).")
+					uiLog(logs, tr("center_file_decrypt_on_recipient"))
 					return
 				}
 				uidx = int(userNumber)
 				if uidx < 0 || uidx >= len(session_keys) {
-					uiLog(logs, fmt.Sprintf("Неизвестный отправитель: owner=%d (нет такого пользователя в center.bin)", userNumber))
+					uiLog(logs, fmt.Sprintf(tr("unknown_sender"), userNumber))
 					return
 				}
 			} else {
@@ -1150,6 +1146,19 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 			if rKey == nil {
 				uiLog(logs, tr("decryption_key_not_available"))
 				return
+			}
+
+			if keyType == 0x01 {
+				if keysLeftLabel != nil {
+					runOnMain(func() { keysLeftLabel.SetText(formatKeysLeft(uidx)) })
+				}
+				if isCenterMode && recipientSelect != nil {
+					runOnMain(func() {
+						selectedUserIdx = uidx
+						recipientSelect.SetSelected(strconv.Itoa(uidx + 1))
+					})
+				}
+				persistKeysToDiskAsync(logs)
 			}
 
 			uiProgressStart(tr("decrypting"))
@@ -1217,9 +1226,6 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 								addLog(logs, tr("decrypt_saved_ok"))
 								uiProgressDone()
 							})
-							if keyType == 0x01 {
-								persistKeysToDiskAsync(logs)
-							}
 						}()
 					}, win)
 

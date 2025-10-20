@@ -67,7 +67,7 @@ type SessionKeySet struct {
 }
 
 // keys.go
-func LoadSessionKeysOutThenInForCenter(
+func LoadSessionKeysForCenter(
 	ostream *bytes.Buffer,
 	rKey []byte,
 	sessionKeys *[]SessionKeySet,

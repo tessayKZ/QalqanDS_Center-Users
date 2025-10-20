@@ -246,7 +246,7 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 
 		var loadErr error
 		if isCenter {
-			loadErr = qalqan.LoadSessionKeysOutThenInForCenter(br, rKey, &session_keys, SkeyInCnt, SkeyOutCnt, users)
+			loadErr = qalqan.LoadSessionKeysForCenter(br, rKey, &session_keys, SkeyInCnt, SkeyOutCnt, users)
 		} else {
 			loadErr = qalqan.LoadSessionKeysInThenOutForUser(br, rKey, &session_keys, SkeyInCnt, SkeyOutCnt, users)
 		}

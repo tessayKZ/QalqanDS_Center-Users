@@ -89,12 +89,12 @@ func writeCurrentKeysFile() error {
 	}
 	for u := firstUser; u < lastUser; u++ {
 		if isCenter {
-			for i := 0; i < sessOut; i++ {
-				enc32(newFile[off:off+key32], session_keys[u].Out[i][:])
-				off += key32
-			}
 			for i := 0; i < sessIn; i++ {
 				enc32(newFile[off:off+key32], session_keys[u].In[i][:])
+				off += key32
+			}
+			for i := 0; i < sessOut; i++ {
+				enc32(newFile[off:off+key32], session_keys[u].Out[i][:])
 				off += key32
 			}
 		} else {

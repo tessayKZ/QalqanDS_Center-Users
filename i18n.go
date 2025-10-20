@@ -67,6 +67,8 @@ var i18n = map[string]map[string]string{
 		"user_n":                       "№%d",
 		"keys_file_updated":            "Key file updated on disk",
 		"keys_countdown":               "%d %s until key rotation (%s)",
+		"center_file_decrypt_on_recipient": "This file was encrypted in Center mode and must be decrypted by the recipient (user).",
+		"unknown_sender":                "Unknown sender: owner=%d (no such user in center.bin)",
 
 		// Change password
 		"change_password":        "Change password",
@@ -148,6 +150,10 @@ var i18n = map[string]map[string]string{
 		"user_n":                       "№%d",
 		"keys_file_updated":            "Файл ключей обновлён на диске",
 		"keys_countdown":               "Осталось до смены ключей %d %s (%s)",
+		"center_file_decrypt_on_recipient": "Этот файл зашифрован в режиме Центра и должен расшифровываться у адресата (пользователя).",
+		"unknown_sender":                "Неизвестный отправитель: owner=%d (нет такого пользователя в center.bin)",
+
+
 
 		// Change password
 		"change_password":        "Смена пароля",
@@ -229,6 +235,9 @@ var i18n = map[string]map[string]string{
 		"user_n":                       "№%d",
 		"keys_file_updated":            "Кілттердің файлы дискіде жаңартылды",
 		"keys_countdown":               "Кілттерді ауыстыруға %d %s қалды (%s)",
+		"center_file_decrypt_on_recipient": "Бұл файл Орталық режимінде шифрланған, оны тек алушы (пайдаланушы) жағы дешифрлеуі тиіс.",
+		"unknown_sender":                "Белгісіз жіберуші: owner=%d (center.bin ішінде мұндай пайдаланушы жоқ)",
+
 
 		// Change password
 		"change_password":        "Құпиясөзді өзгерту",
