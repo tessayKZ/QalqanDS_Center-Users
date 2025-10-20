@@ -764,6 +764,7 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 	content := container.NewStack(bgImage, container.NewPadded(mainUI))
 
 	win.SetContent(content)
+	win.CenterOnScreen()
 
 	selectedLanguage.SetSelected(currentLang)
 

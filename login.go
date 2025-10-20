@@ -282,8 +282,11 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			return
 		}
 
-		InitMainUI(app, win)
-		win.SetFixedSize(false)
+		runOnMain(func() {
+			InitMainUI(app, win)
+			win.SetFixedSize(false)
+			win.CenterOnScreen()
+		})
 	}
 
 	applyI18nLogin()
