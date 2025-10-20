@@ -244,8 +244,14 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			}
 		}
 
-		if err := qalqan.LoadSessionKeysDynamic(br, rKey, &session_keys, SkeyInCnt, SkeyOutCnt, users); err != nil {
-			dialog.ShowError(err, win)
+		var loadErr error
+		if isCenter {
+			loadErr = qalqan.LoadSessionKeysOutThenInForCenter(br, rKey, &session_keys, SkeyInCnt, SkeyOutCnt, users)
+		} else {
+			loadErr = qalqan.LoadSessionKeysInThenOutForUser(br, rKey, &session_keys, SkeyInCnt, SkeyOutCnt, users)
+		}
+		if loadErr != nil {
+			dialog.ShowError(loadErr, win)
 			return
 		}
 

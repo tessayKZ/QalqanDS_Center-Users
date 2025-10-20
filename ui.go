@@ -109,7 +109,7 @@ func buildServiceInfo(fileTypeCode, keyType byte, circleNo int, usedIdx int) [qa
 		s[6] = byte(circleNo)
 	}
 
-	if usedIdx >= 0 && usedIdx <= 999 {
+	if usedIdx > 0 && usedIdx <= 0xFFFF {
 		s[7] = byte(usedIdx >> 8)
 		s[8] = byte(usedIdx)
 	}
@@ -122,16 +122,8 @@ func decodeSessionIndex(si []byte) int {
 		return -1
 	}
 
-	//lo8 := int(si[8])
-	//hi3 := int(si[7] & 0x07)
 	nBE := int(si[7])<<8 | int(si[8])
-	return (nBE - 1)
-
-	/*if (si[8] & 0x80) != 0 {
-	}
-	lo8 := int(si[7])
-	hi2 := int(si[8] & 0x03)
-	return (hi2 << 8) | lo8*/
+	return (nBE - 1) // если -1 (нет индекса), иначе 0-базовый индекс
 }
 
 func keyPrefIsSession() bool { return keyPref == KeyPrefSession }
@@ -418,7 +410,6 @@ func useAndDeleteSessionIn(userIdx, idx int) ([]uint8, int) {
 	if sessionKeyAllZero(&session_keys[userIdx].In[idx]) {
 		return nil, -1
 	}
-
 	raw := session_keys[userIdx].In[idx][:]
 	rkey := make([]uint8, qalqan.EXPKLEN)
 	qalqan.Kexp(raw, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, rkey)
@@ -432,7 +423,7 @@ func useAndDeleteSessionIn(userIdx, idx int) ([]uint8, int) {
 	return rkey, idx
 }
 
-func useAndDeleteSessionOut(userIdx int, _ int) ([]uint8, int) {
+func useAndDeleteSessionOut(userIdx int, start int) ([]uint8, int) {
 	if len(session_keys) == 0 || userIdx < 0 || userIdx >= len(session_keys) {
 		return nil, -1
 	}
@@ -441,7 +432,8 @@ func useAndDeleteSessionOut(userIdx int, _ int) ([]uint8, int) {
 		return nil, -1
 	}
 
-	for idx := 0; idx < outCnt; idx++ {
+	for ofs := 0; ofs < outCnt; ofs++ {
+		idx := (start + ofs) % outCnt
 		if !sessionKeyAllZero(&session_keys[userIdx].Out[idx]) {
 			raw := session_keys[userIdx].Out[idx][:]
 			rkey := make([]uint8, qalqan.EXPKLEN)
@@ -451,7 +443,7 @@ func useAndDeleteSessionOut(userIdx int, _ int) ([]uint8, int) {
 				session_keys[userIdx].Out[idx][j] = 0
 			}
 
-			nextOutIdx[userIdx] = idx + 1
+			nextOutIdx[userIdx] = (idx + 1) % outCnt
 			if nextOutIdx[userIdx] >= outCnt {
 				nextOutIdx[userIdx] = 0
 			}
@@ -508,7 +500,7 @@ func chooseKeyForEncryption(targetUserIdx int, useSession bool) (rKey []byte, ke
 		if uidx < 0 || uidx >= len(session_keys) {
 			uidx = localUserIndex
 		}
-		start := 0
+		start := nextOutIdx[uidx]
 		if rk, idx := useAndDeleteSessionOut(uidx, start); rk != nil && idx >= 0 {
 			return rk, 0x01, -1, idx, nil // 0x01 = session
 		}
@@ -970,9 +962,6 @@ func makeEncryptButton(win fyne.Window, logs *widget.RichText, keysLeft *widget.
 					if useSession && usedIdx >= 0 {
 						runOnMain(func() {
 							keysLeft.SetText(formatKeysLeft(targetIdx))
-							if isCenterMode && recipientSelect != nil {
-								recipientSelect.SetSelected(strconv.Itoa(targetIdx + 1))
-							}
 						})
 						persistKeysToDiskAsync(logs)
 					}
@@ -1135,10 +1124,14 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 			var rKey []byte
 			var uidx int
 			if isCenterMode {
-				if userNumber > 0 {
-					uidx = int(userNumber)
-				} else {
-					uidx = 0
+				if userNumber == 0x33 {
+					uiLog(logs, "Этот файл зашифрован в режиме Центра и должен расшифровываться у адресата (пользователя).")
+					return
+				}
+				uidx = int(userNumber)
+				if uidx < 0 || uidx >= len(session_keys) {
+					uiLog(logs, fmt.Sprintf("Неизвестный отправитель: owner=%d (нет такого пользователя в center.bin)", userNumber))
+					return
 				}
 			} else {
 				uidx = localUserIndex
@@ -1147,6 +1140,10 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 			if keyType == 0x00 {
 				rKey = useCircleKey(circleKeyNumber)
 			} else {
+				if sessionIndex < 0 || sessionIndex >= len(session_keys[uidx].In) {
+					uiLog(logs, tr("invalid_session_index"))
+					return
+				}
 				rKey, _ = useAndDeleteSessionIn(uidx, sessionIndex)
 			}
 
@@ -1220,7 +1217,9 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 								addLog(logs, tr("decrypt_saved_ok"))
 								uiProgressDone()
 							})
-							persistKeysToDiskAsync(logs)
+							if keyType == 0x01 {
+								persistKeysToDiskAsync(logs)
+							}
 						}()
 					}, win)
 

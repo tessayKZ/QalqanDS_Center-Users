@@ -78,10 +78,10 @@ func writeCurrentKeysFile() error {
 		qalqan.Encrypt(src32[16:32], currentRKey, qalqan.DEFAULT_KEY_LEN, qalqan.BLOCKLEN, dst[16:32])
 	}
 
-	for i := 0; i < circleCnt; i++ {
-		enc32(newFile[off:off+key32], circle_keys[i][:])
-		off += key32
-	}
+	circleStart := headerLen + kikeyLen
+	circleLen := circleCnt * key32
+	copy(newFile[off:off+circleLen], data[circleStart:circleStart+circleLen])
+	off += circleLen
 
 	firstUser, lastUser := 0, users
 	if !isCenter {

@@ -8,7 +8,6 @@
 	[4] - count IN keys in file (BE16)
 	[5] - count OUT keys in file (BE16)
 	[6..15] - trash data
-
 * [32] byte - Kikey;
 * [100][32] byte - Circle key;
 * [2000][32] byte - Session keys <out> * users count, used sessions keys <out> delete in file center.bin;
@@ -67,41 +66,91 @@ type SessionKeySet struct {
 	Out [][DEFAULT_KEY_LEN]byte
 }
 
-func LoadSessionKeysOutThenIn(
-    ostream *bytes.Buffer,
-    rKey []byte,
-    sessionKeys *[]SessionKeySet,
-    inCnt, outCnt, users int,
+// keys.go
+func LoadSessionKeysOutThenInForCenter(
+	ostream *bytes.Buffer,
+	rKey []byte,
+	sessionKeys *[]SessionKeySet,
+	inCnt, outCnt, users int,
 ) error {
-    const k32 = DEFAULT_KEY_LEN
-    *sessionKeys = make([]SessionKeySet, users)
-    readKey := make([]byte, k32)
+	const k32 = DEFAULT_KEY_LEN
 
-    for u := 0; u < users; u++ {
-        // OUT
-        (*sessionKeys)[u].Out = make([][DEFAULT_KEY_LEN]byte, outCnt)
-        for i := 0; i < outCnt; i++ {
-            if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
-                return fmt.Errorf("LoadSessionKeysOutThenIn: read OUT u=%d i=%d: %w", u, i, err)
-            }
-            for j := 0; j < k32; j += BLOCKLEN {
-                DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
-            }
-            copy((*sessionKeys)[u].Out[i][:], readKey[:])
-        }
-        // IN
-        (*sessionKeys)[u].In = make([][DEFAULT_KEY_LEN]byte, inCnt)
-        for i := 0; i < inCnt; i++ {
-            if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
-                return fmt.Errorf("LoadSessionKeysOutThenIn: read IN u=%d i=%d: %w", u, i, err)
-            }
-            for j := 0; j < k32; j += BLOCKLEN {
-                DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
-            }
-            copy((*sessionKeys)[u].In[i][:], readKey[:])
-        }
-    }
-    return nil
+	need := users * (inCnt + outCnt) * k32
+	if need > ostream.Len() {
+		return fmt.Errorf("LoadSessionKeysOutThenInForCenter: not enough data: need=%d have=%d", need, ostream.Len())
+	}
+
+	*sessionKeys = make([]SessionKeySet, users)
+	readKey := make([]byte, k32)
+
+	for u := 0; u < users; u++ {
+		// IN
+		(*sessionKeys)[u].In = make([][DEFAULT_KEY_LEN]byte, inCnt)
+		for i := 0; i < inCnt; i++ {
+			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
+				return fmt.Errorf("LoadSessionKeysOutThenInForCenter: read IN u=%d i=%d: %w", u, i, err)
+			}
+			for j := 0; j < k32; j += BLOCKLEN {
+				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
+			}
+			copy((*sessionKeys)[u].In[i][:], readKey[:])
+		}
+		// OUT
+		(*sessionKeys)[u].Out = make([][DEFAULT_KEY_LEN]byte, outCnt)
+		for i := 0; i < outCnt; i++ {
+			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
+				return fmt.Errorf("LoadSessionKeysOutThenInForCenter: read OUT u=%d i=%d: %w", u, i, err)
+			}
+			for j := 0; j < k32; j += BLOCKLEN {
+				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
+			}
+			copy((*sessionKeys)[u].Out[i][:], readKey[:])
+		}
+	}
+	return nil
+}
+
+func LoadSessionKeysInThenOutForUser(
+	ostream *bytes.Buffer,
+	rKey []byte,
+	sessionKeys *[]SessionKeySet,
+	inCnt, outCnt, users int,
+) error {
+	const k32 = DEFAULT_KEY_LEN
+
+	need := users * (inCnt + outCnt) * k32
+	if need > ostream.Len() {
+		return fmt.Errorf("LoadSessionKeysInThenOut: not enough data: need=%d have=%d", need, ostream.Len())
+	}
+
+	*sessionKeys = make([]SessionKeySet, users)
+	readKey := make([]byte, k32)
+
+	for u := 0; u < users; u++ {
+		// IN
+		(*sessionKeys)[u].In = make([][DEFAULT_KEY_LEN]byte, inCnt)
+		for i := 0; i < inCnt; i++ {
+			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
+				return fmt.Errorf("LoadSessionKeysInThenOut: read IN u=%d i=%d: %w", u, i, err)
+			}
+			for j := 0; j < k32; j += BLOCKLEN {
+				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
+			}
+			copy((*sessionKeys)[u].In[i][:], readKey[:])
+		}
+		// OUT
+		(*sessionKeys)[u].Out = make([][DEFAULT_KEY_LEN]byte, outCnt)
+		for i := 0; i < outCnt; i++ {
+			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
+				return fmt.Errorf("LoadSessionKeysInThenOut: read OUT u=%d i=%d: %w", u, i, err)
+			}
+			for j := 0; j < k32; j += BLOCKLEN {
+				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
+			}
+			copy((*sessionKeys)[u].Out[i][:], readKey[:])
+		}
+	}
+	return nil
 }
 
 func Hash512(value string) [32]byte {
@@ -134,42 +183,5 @@ func LoadCircleKeys(
 		}
 		copy((*dst)[i][:], readCircleKey[:])
 	}
-	return nil
-}
-
-func LoadSessionKeysDynamic(
-	ostream *bytes.Buffer,
-	rKey []byte,
-	sessionKeys *[]SessionKeySet,
-	inCnt, outCnt, users int,
-) error {
-	const k32 = DEFAULT_KEY_LEN
-
-	*sessionKeys = make([]SessionKeySet, users)
-	readKey := make([]byte, k32)
-
-	for u := 0; u < users; u++ {
-		(*sessionKeys)[u].In = make([][DEFAULT_KEY_LEN]byte, inCnt)
-		for i := 0; i < inCnt; i++ {
-			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
-				return fmt.Errorf("LoadSessionKeysDynamic User: read IN u=%d i=%d: %w", u, i, err)
-			}
-			for j := 0; j < k32; j += BLOCKLEN {
-				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
-			}
-			copy((*sessionKeys)[u].In[i][:], readKey[:])
-		}
-		(*sessionKeys)[u].Out = make([][DEFAULT_KEY_LEN]byte, outCnt)
-		for i := 0; i < outCnt; i++ {
-			if _, err := io.ReadFull(ostream, readKey[:k32]); err != nil {
-				return fmt.Errorf("LoadSessionKeysDynamic User: read OUT u=%d i=%d: %w", u, i, err)
-			}
-			for j := 0; j < k32; j += BLOCKLEN {
-				DecryptOFB(readKey[j:j+BLOCKLEN], rKey, k32, BLOCKLEN, readKey[j:j+BLOCKLEN])
-			}
-			copy((*sessionKeys)[u].Out[i][:], readKey[:])
-		}
-	}
-
 	return nil
 }
