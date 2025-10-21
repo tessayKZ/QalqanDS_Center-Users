@@ -66,7 +66,6 @@ type SessionKeySet struct {
 	Out [][DEFAULT_KEY_LEN]byte
 }
 
-// keys.go
 func LoadSessionKeysForCenter(
 	ostream *bytes.Buffer,
 	rKey []byte,

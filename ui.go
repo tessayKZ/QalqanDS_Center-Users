@@ -686,8 +686,8 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 	encBtn = makeEncryptButton(win, logs, keysLeftLabel)
 	decBtn = makeDecryptButton(win, logs)
 
-	encBtnWrap := container.NewGridWrap(fyne.NewSize(130, 44), encBtn)
-	decBtnWrap := container.NewGridWrap(fyne.NewSize(130, 44), decBtn)
+	encBtnWrap := container.NewGridWrap(fyne.NewSize(140, 44), encBtn)
+	decBtnWrap := container.NewGridWrap(fyne.NewSize(140, 44), decBtn)
 
 	encIcon, _ := fyne.LoadResourceFromPath("assets/encrypt.png")
 	if encIcon == nil {
@@ -812,7 +812,7 @@ func uiProgressStart(title string) {
 	progressTitle = title
 	runOnMain(func() {
 		if progressLabel != nil {
-			progressLabel.SetText(title + "… 0%")
+			progressLabel.SetText(title)
 		}
 		if progressBar != nil {
 			progressBar.SetValue(0)
@@ -827,9 +827,6 @@ func uiProgressSet(f float64) {
 	runOnMain(func() {
 		if progressBar != nil {
 			progressBar.SetValue(f)
-		}
-		if progressLabel != nil {
-			progressLabel.SetText(fmt.Sprintf("%s… %d%%", progressTitle, int(f*100)))
 		}
 	})
 }
@@ -1021,9 +1018,9 @@ func openSingleFileEncryptFlow(win fyne.Window, logs *widget.RichText, keysLeft 
 						return
 					}
 					if writer == nil {
+						uiProgressDone()
 						return
 					}
-
 					go func() {
 						defer writer.Close()
 						data := out.Bytes()
@@ -1274,9 +1271,9 @@ func makeDecryptButton(win fyne.Window, logs *widget.RichText) *widget.Button {
 						return
 					}
 					if writer == nil {
+						uiProgressDone()
 						return
 					}
-
 					go func() {
 						defer writer.Close()
 
