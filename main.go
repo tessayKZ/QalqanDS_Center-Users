@@ -38,9 +38,9 @@ func (blackTextTheme) Size(name fyne.ThemeSizeName) float32 {
 }
 
 func main() {
-	myApp := app.NewWithID("QalqanDS")
+	myApp := app.NewWithID("TORII-DS")
 	myApp.Settings().SetTheme(&blackTextTheme{})
-	win := myApp.NewWindow("QalqanDS")
+	win := myApp.NewWindow("TORII-DS")
 	setWindowIcon(win)
 
 	ShowLogin(myApp, win)

@@ -17,7 +17,7 @@ var i18n = map[string]map[string]string{
 		"pick_keys_file":      "Pick keys file",
 		"no_file_selected":    "No file selected.",
 		"file_too_short":      "The file is too short",
-		"file_corrupted":      "The file is corrupted",
+		"file_corrupted":      "Incorrect password",
 		"keys_loaded":         "Keys loaded successfully!",
 		"wrong_password":      "Wrong password",
 		"both_keyfiles_found": "Both center.bin and abc.bin are in the app folder. Please delete one and leave only one.",
@@ -69,6 +69,8 @@ var i18n = map[string]map[string]string{
 		"keys_countdown":                   "%d %s until key rotation (%s)",
 		"center_file_decrypt_on_recipient": "This file was encrypted in Center mode and must be decrypted by the recipient (user).",
 		"unknown_sender":                   "Unknown sender: owner=%d (no such user in center.bin)",
+		"recipient_disabled_circle":        "Unavailable for Circle keys",
+		"switch_to_session_hint":           "Switch to “Session keys” to choose a recipient.",
 
 		//mini-encrypt window
 		"encrypt_choose_mode": "Choose what to encrypt",
@@ -116,7 +118,7 @@ var i18n = map[string]map[string]string{
 		"pick_keys_file":      "Выберите файл ключей",
 		"no_file_selected":    "Файл не выбран.",
 		"file_too_short":      "Файл слишком короткий",
-		"file_corrupted":      "Файл повреждён",
+		"file_corrupted":      "Неверный пароль",
 		"keys_loaded":         "Ключи успешно загружены!",
 		"wrong_password":      "Пароль неверный",
 		"both_keyfiles_found": "В папке с приложением найдены оба файла: center.bin и abc.bin. Удалите один и оставьте только один.",
@@ -168,6 +170,7 @@ var i18n = map[string]map[string]string{
 		"keys_countdown":                   "Осталось до смены ключей %d %s (%s)",
 		"center_file_decrypt_on_recipient": "Этот файл зашифрован в режиме Центра и должен расшифровываться у адресата (пользователя).",
 		"unknown_sender":                   "Неизвестный отправитель: owner=%d (нет такого пользователя в center.bin)",
+		"switch_to_session_hint":           "Переключитесь на «Сессионные ключи», чтобы выбрать получателя",
 
 		//mini-encrypt window
 		"encrypt_choose_mode": "Выберите, что шифровать",
@@ -215,7 +218,7 @@ var i18n = map[string]map[string]string{
 		"pick_keys_file":      "Кілт файлды таңдаңыз",
 		"no_file_selected":    "Файл таңдалмады.",
 		"file_too_short":      "Файл тым қысқа",
-		"file_corrupted":      "Файл бүлінген",
+		"file_corrupted":      "Құпиясөз дұрыс емес",
 		"keys_loaded":         "Кілттер сәтті жүктелді!",
 		"both_keyfiles_found": "Папкада екі файл да табылды: center.bin және abc.bin. Біреуін жою керек, тек біреуін қалдырыңыз.",
 		"no_keyfiles_found":   "Папкада center.bin да, abc.bin да табылмады.",
@@ -259,7 +262,7 @@ var i18n = map[string]map[string]string{
 		"file_too_big":                     "Файл 2 ГБ шектен асады",
 		"encrypting":                       "Шифрлау...",
 		"decrypting":                       "Дешифрлау...",
-		"encrypt_to":                       "Кімге шифрлеу",
+		"encrypt_to":                       "Кімге шифрлау",
 		"key_type_session":                 "Сеанстық кілттер",
 		"key_type_circle":                  "Циркулярлық кілттер",
 		"user_n":                           "№%d",
@@ -267,6 +270,8 @@ var i18n = map[string]map[string]string{
 		"keys_countdown":                   "Кілттерді ауыстыруға %d %s қалды (%s)",
 		"center_file_decrypt_on_recipient": "Бұл файл Орталық режимінде шифрланған, оны тек алушы (пайдаланушы) жағы дешифрлеуі тиіс.",
 		"unknown_sender":                   "Белгісіз жіберуші: owner=%d (center.bin ішінде мұндай пайдаланушы жоқ)",
+		"recipient_disabled_circle":        "Циркулярлық кілттер қолжетімсіз",
+		"switch_to_session_hint":           "Қабылдаушы таңдау үшін «Сеанстық кілттерге» ауысыңыз",
 
 		//mini-encrypt window
 		"encrypt_choose_mode": "Нені шифрлаймыз?",

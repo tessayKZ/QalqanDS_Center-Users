@@ -296,18 +296,21 @@ func updateKeysDates(keysPath string) {
 }
 
 var (
-	isCenterMode    bool
-	session_keys    []qalqan.SessionKeySet
-	circle_keys     [][qalqan.DEFAULT_KEY_LEN]byte
-	rimitkey        []byte
-	localUserIndex       = 0
-	localUserNumber byte = 1
-	keysDateLabel   *widget.Label
-	keysDatesText   string
-	lastKeyHashHex  string
-	keysExpiryCache time.Time
-	nextOutIdx      []int
-	nextCircleIdx   int
+	isCenterMode       bool
+	session_keys       []qalqan.SessionKeySet
+	circle_keys        [][qalqan.DEFAULT_KEY_LEN]byte
+	rimitkey           []byte
+	localUserIndex          = 0
+	localUserNumber    byte = 1
+	keysDateLabel      *widget.Label
+	keysDatesText      string
+	lastKeyHashHex     string
+	keysExpiryCache    time.Time
+	nextOutIdx         []int
+	nextCircleIdx      int
+	recipientHintLabel *widget.Label
+	recipientDim       *canvas.Rectangle
+	recipientLockLbl   *widget.Label
 )
 
 func init() {
@@ -583,6 +586,8 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 	}
 
 	selectedLanguage := widget.NewSelect([]string{"KZ", "RU", "EN"}, nil)
+	var updateRecipientState func()
+	var changePwdBtn *widget.Button
 	selectedLanguage.PlaceHolder = tr("select_language")
 	selectedLanguage.OnChanged = func(code string) {
 		setLang(app, code)
@@ -612,10 +617,6 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 			modeLabel.SetText(getModeLabelText())
 		}
 		selectedLanguage.PlaceHolder = tr("select_language")
-		if recipientCard != nil {
-			recipientCard.Subtitle = tr("encrypt_to")
-			recipientCard.Refresh()
-		}
 		if keyTypeCard != nil {
 			keyTypeCard.Subtitle = tr("select_key_type")
 			keyTypeCard.Refresh()
@@ -630,6 +631,30 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		if keysDateLabel != nil {
 			keysDateLabel.SetText(formatKeysCountdownText(keysExpiryCache))
 		}
+		if changePwdBtn != nil {
+			changePwdBtn.SetText(tr("change_password"))
+		}
+		updateRecipientState()
+	}
+
+	{
+		icon, _ := fyne.LoadResourceFromPath("assets/key.png")
+		if icon == nil {
+			icon = theme.SettingsIcon()
+		}
+
+		changePwdBtn = widget.NewButtonWithIcon(tr("change_password"), icon, func() {
+			if strings.TrimSpace(keysFilePath) == "" || len(currentPlainKikey) != qalqan.DEFAULT_KEY_LEN {
+				dialog.ShowError(fmt.Errorf(tr("need_keys_first")), win)
+				return
+			}
+			data, err := os.ReadFile(keysFilePath)
+			if err != nil {
+				dialog.ShowError(err, win)
+				return
+			}
+			ShowChangePassword(app, win, keysFilePath, data, append([]byte(nil), currentPlainKikey...))
+		})
 	}
 
 	logs, logsArea := makeLogsArea()
@@ -653,8 +678,49 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		keyPref = KeyPrefCircle
 	}
 
+	var recipientDisabledPrev *bool
+
+	updateRecipientState = func() {
+		if !isCenterMode || recipientSelect == nil || recipientCard == nil {
+			return
+		}
+		wantDisabled := (keyPref != KeyPrefSession)
+
+		if recipientDisabledPrev != nil && *recipientDisabledPrev == wantDisabled {
+		} else {
+			recipientDisabledPrev = &wantDisabled
+			if wantDisabled {
+				msg := tr("switch_to_session_hint")
+				if recipientHintLabel != nil {
+					recipientHintLabel.Show()
+				}
+				uiLog(logs, msg)
+			}
+		}
+
+		if wantDisabled {
+			recipientSelect.Disable()
+			if recipientLockLbl != nil {
+				recipientLockLbl.Show()
+			}
+			recipientCard.Subtitle = tr("encrypt_to")
+			recipientCard.Refresh()
+		} else {
+			recipientSelect.Enable()
+			if recipientLockLbl != nil {
+				recipientLockLbl.Hide()
+			}
+			if recipientHintLabel != nil {
+				recipientHintLabel.Hide()
+			}
+			recipientCard.Subtitle = tr("encrypt_to")
+			recipientCard.Refresh()
+		}
+	}
+
 	keyTypeSelect = widget.NewSelect(keyPrefOptions(), func(s string) {
 		keyPref = labelToKeyPref(s)
+		updateRecipientState()
 	})
 	keyTypeSelect.SetSelected(keyPrefToLabel(keyPref))
 
@@ -677,12 +743,26 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		recipientSelect.SetSelected(opts[0])
 		keysLeftLabel.SetText(formatKeysLeft(selectedUserIdx))
 
-		recipientCard = widget.NewCard("", tr("encrypt_to"), container.NewVBox(recipientSelect))
+		recipientHintLabel = widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
+		recipientHintLabel.Hide()
+
+		recipientLockLbl = widget.NewLabelWithStyle("🔒", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+		recipientLockLbl.Hide()
+
+		inner := container.NewVBox(recipientSelect, widget.NewLabel(" "), recipientHintLabel)
+
+		stacked := container.NewMax(
+			inner,
+			container.NewCenter(recipientLockLbl),
+		)
+
+		recipientCard = widget.NewCard("", tr("encrypt_to"), stacked)
 		recipientWrap = container.NewGridWrap(fyne.NewSize(200, 100), recipientCard)
+
+		updateRecipientState()
 	} else {
 		selectedUserIdx = localUserIndex
 	}
-
 	encBtn = makeEncryptButton(win, logs, keysLeftLabel)
 	decBtn = makeDecryptButton(win, logs)
 
@@ -723,6 +803,8 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 	topBar := container.NewHBox(
 		container.NewPadded(left),
 		layout.NewSpacer(),
+		container.NewGridWrap(fyne.NewSize(180, 28), changePwdBtn),
+		widget.NewLabel(" "),
 		container.NewGridWrap(fyne.NewSize(65, 28), selectedLanguage),
 	)
 
@@ -763,11 +845,32 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		logsArea,
 	)
 
-	content := container.NewStack(bgImage, container.NewPadded(mainUI))
+	content := container.NewStack(bgImage, mainUI)
 
 	win.SetContent(content)
-	win.Resize(fyne.NewSize(860, 560))
-	win.CenterOnScreen()
+
+	fyne.Do(func() {
+		win.SetFullScreen(!win.FullScreen())
+		app.Preferences().SetBool("fullscreen", !win.FullScreen())
+	})
+
+	win.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
+		switch ev.Name {
+		case fyne.KeyF11:
+			newVal := !win.FullScreen()
+			fyne.Do(func() {
+				win.SetFullScreen(newVal)
+				app.Preferences().SetBool("fullscreen", newVal)
+			})
+		case fyne.KeyEscape:
+			if win.FullScreen() {
+				fyne.Do(func() {
+					win.SetFullScreen(false)
+					app.Preferences().SetBool("fullscreen", false)
+				})
+			}
+		}
+	})
 
 	selectedLanguage.SetSelected(currentLang)
 

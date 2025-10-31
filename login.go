@@ -71,7 +71,7 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 		applyI18nLogin()
 	}
 
-	signIn.OnTapped = func() {
+	doSignIn := func() {
 		password := passEntry.Text
 		if password == "" {
 			dialog.ShowInformation(tr("error"), tr("enter_password"), win)
@@ -284,12 +284,23 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 
 		runOnMain(func() {
 			InitMainUI(app, win)
+
 			win.SetFixedSize(false)
-			win.Resize(fyne.NewSize(860, 560))
-			win.CenterOnScreen()
+			win.SetPadded(false)
+
+			if app.Preferences().BoolWithFallback("fullscreen", true) {
+				win.SetFullScreen(true)
+			} else {
+				win.SetFullScreen(false)
+				win.Resize(fyne.NewSize(900, 750))
+				win.CenterOnScreen()
+			}
 		})
+
 	}
 
+	signIn.OnTapped = doSignIn
+	passEntry.OnSubmitted = func(_ string) { doSignIn() }
 	applyI18nLogin()
 	langSelect.SetSelected(currentLang)
 
@@ -315,6 +326,7 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 	)
 
 	win.SetContent(container.NewStack(bg, container.NewPadded(root)))
+	win.Canvas().Focus(passEntry)
 }
 
 var (

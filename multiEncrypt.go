@@ -193,19 +193,19 @@ func writeQpkg(w io.Writer, files []string) error {
 }
 
 func uniquePath(p string) string {
-    if _, err := os.Stat(p); os.IsNotExist(err) {
-        return p
-    }
-    dir := filepath.Dir(p)
-    base := filepath.Base(p)
-    ext := filepath.Ext(base)
-    name := strings.TrimSuffix(base, ext)
-    for i := 1; ; i++ {
-        cand := filepath.Join(dir, fmt.Sprintf("%s_%d%s", name, i, ext))
-        if _, err := os.Stat(cand); os.IsNotExist(err) {
-            return cand
-        }
-    }
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		return p
+	}
+	dir := filepath.Dir(p)
+	base := filepath.Base(p)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	for i := 1; ; i++ {
+		cand := filepath.Join(dir, fmt.Sprintf("%s_%d%s", name, i, ext))
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			return cand
+		}
+	}
 }
 
 func unpackQpkg(r io.Reader, dest string) error {
@@ -513,88 +513,95 @@ func encryptFilesAsQpkg(win fyne.Window, logs *widget.RichText, keysLeft *widget
 	setMultiFlag(&svc)
 
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(writeQpkg(pw, files)) }()
+	go func() { _ = pw.CloseWithError(writeQpkg(pw, files)) }()
 
 	uiProgressStart(tr("encrypting"))
 
-	ctBuf := &bytes.Buffer{}
-	src := &progressReader{
-		r:     pr,
-		total: totalLen,
-		emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
-	}
+	go func() {
+		defer pr.Close()
 
-	var encErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				encErr = fmt.Errorf("encrypt failed: %v", r)
-			}
-		}()
-		qalqan.EncryptOFB_File(int(totalLen), rKey, iv, src, ctBuf)
-	}()
-	if encErr != nil {
-		runOnMain(func() { uiProgressDone() })
-		dialog.ShowError(encErr, win)
-		return
-	}
+		ctBuf := &bytes.Buffer{}
+		src := &progressReader{
+			r:     pr,
+			total: totalLen,
+			emit:  func(f float64) { runOnMain(func() { uiProgressSet(f) }) },
+		}
 
-	out := &bytes.Buffer{}
-	out.Write(svc[:])
-
-	meta := make([]byte, qalqan.BLOCKLEN)
-	qalqan.Qalqan_Imit(uint64(qalqan.BLOCKLEN), rimitkey, bytes.NewReader(svc[:]), meta)
-	out.Write(meta)
-
-	out.Write(iv)
-	out.Write(ctBuf.Bytes())
-
-	fileImit := make([]byte, qalqan.BLOCKLEN)
-	qalqan.Qalqan_Imit(uint64(out.Len()), rimitkey, bytes.NewReader(out.Bytes()), fileImit)
-	out.Write(fileImit)
-
-	if useSession && usedIdx >= 0 {
-		runOnMain(func() { keysLeft.SetText(formatKeysLeft(targetIdx)) })
-		persistKeysToDiskAsync(logs)
-	}
-
-	runOnMain(func() {
-		saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
-			if err != nil {
-				addLog(logs, fmt.Sprintf(tr("save_error"), err))
-				return
-			}
-			if writer == nil {
-				return
-			}
-			go func() {
-				defer writer.Close()
-				data := out.Bytes()
-				const chunk = 8 << 20
-				for off := 0; off < len(data); off += chunk {
-					end := off + chunk
-					if end > len(data) {
-						end = len(data)
-					}
-					if _, werr := writer.Write(data[off:end]); werr != nil {
-						runOnMain(func() {
-							addLog(logs, fmt.Sprintf(tr("write_error"), werr))
-							uiProgressDone()
-						})
-						return
-					}
-					runOnMain(func() { uiProgressSet(float64(end) / float64(len(data))) })
+		var encErr error
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					encErr = fmt.Errorf("encrypt failed: %v", r)
 				}
-				runOnMain(func() {
-					uiProgressDone()
-					addLog(logs, tr("encrypt_saved_ok"))
-				})
 			}()
-		}, win)
+			qalqan.EncryptOFB_File(int(totalLen), rKey, iv, src, ctBuf)
+		}()
+		if encErr != nil {
+			runOnMain(func() {
+				uiProgressDone()
+				dialog.ShowError(encErr, win)
+			})
+			return
+		}
 
-		saveDialog.Resize(fyne.NewSize(700, 700))
-		saveDialog.SetFileName(suggestArchiveName(files))
-		saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
-		saveDialog.Show()
-	})
+		out := &bytes.Buffer{}
+		out.Write(svc[:])
+
+		meta := make([]byte, qalqan.BLOCKLEN)
+		qalqan.Qalqan_Imit(uint64(qalqan.BLOCKLEN), rimitkey, bytes.NewReader(svc[:]), meta)
+		out.Write(meta)
+
+		out.Write(iv)
+		out.Write(ctBuf.Bytes())
+
+		fileImit := make([]byte, qalqan.BLOCKLEN)
+		qalqan.Qalqan_Imit(uint64(out.Len()), rimitkey, bytes.NewReader(out.Bytes()), fileImit)
+		out.Write(fileImit)
+
+		if useSession && usedIdx >= 0 {
+			runOnMain(func() { keysLeft.SetText(formatKeysLeft(targetIdx)) })
+			persistKeysToDiskAsync(logs)
+		}
+
+		runOnMain(func() {
+			saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, err error) {
+				if err != nil {
+					addLog(logs, fmt.Sprintf(tr("save_error"), err))
+					return
+				}
+				if writer == nil {
+					uiProgressDone()
+					return
+				}
+				go func() {
+					defer writer.Close()
+					data := out.Bytes()
+					const chunk = 8 << 20 // 8MB
+					for off := 0; off < len(data); off += chunk {
+						end := off + chunk
+						if end > len(data) {
+							end = len(data)
+						}
+						if _, werr := writer.Write(data[off:end]); werr != nil {
+							runOnMain(func() {
+								addLog(logs, fmt.Sprintf(tr("write_error"), werr))
+								uiProgressDone()
+							})
+							return
+						}
+						runOnMain(func() { uiProgressSet(float64(end) / float64(len(data))) })
+					}
+					runOnMain(func() {
+						uiProgressDone()
+						addLog(logs, tr("encrypt_saved_ok"))
+					})
+				}()
+			}, win)
+
+			saveDialog.Resize(fyne.NewSize(700, 700))
+			saveDialog.SetFileName(suggestArchiveName(files))
+			saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".bin"}))
+			saveDialog.Show()
+		})
+	}()
 }
