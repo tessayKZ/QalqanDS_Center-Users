@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"image/color"
 	"io"
 	"math/big"
 	"os"
@@ -151,6 +152,24 @@ func fileTypeDefaultExt(ft byte) string {
 	default:
 		return ".bin"
 	}
+}
+
+func makeTitleBanner() fyne.CanvasObject {
+	title := canvas.NewText("Qalqan-DS", color.White)
+	title.TextSize = 36
+	title.TextStyle = fyne.TextStyle{Bold: true}
+
+	shadow := canvas.NewText(title.Text, color.NRGBA{0, 0, 0, 140})
+	shadow.TextSize = title.TextSize
+	shadow.TextStyle = title.TextStyle
+
+	stack := container.NewWithoutLayout(shadow, title)
+	title.Move(fyne.NewPos(0, 0))
+	shadow.Move(fyne.NewPos(3, 4))
+	stack.Resize(fyne.NewSize(title.MinSize().Width+4, title.MinSize().Height+6))
+	boxed := container.NewVBox(stack)
+
+	return container.NewCenter(boxed)
 }
 
 func suggestDecryptedNameFromPath(p string, fileType byte) string {
@@ -789,6 +808,7 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 
 	encCardWrap := container.NewGridWrap(fyne.NewSize(285, 110), encCard)
 	decCardWrap := container.NewGridWrap(fyne.NewSize(285, 110), decCard)
+	titleBanner := makeTitleBanner()
 
 	modeLabel = widget.NewLabelWithStyle(getModeLabelText(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
@@ -837,22 +857,15 @@ func InitMainUI(app fyne.App, win fyne.Window) {
 		topBar,
 		widget.NewLabel(" "),
 		infoRow,
-		widget.NewLabel(" "),
+		titleBanner,
 		progressCard,
-		widget.NewLabel(" "),
 		actionsRow,
 		widget.NewLabel(" "),
 		logsArea,
 	)
 
 	content := container.NewStack(bgImage, mainUI)
-
 	win.SetContent(content)
-
-	fyne.Do(func() {
-		win.SetFullScreen(!win.FullScreen())
-		app.Preferences().SetBool("fullscreen", !win.FullScreen())
-	})
 
 	win.Canvas().SetOnTypedKey(func(ev *fyne.KeyEvent) {
 		switch ev.Name {

@@ -288,15 +288,14 @@ func ShowLogin(app fyne.App, win fyne.Window) {
 			win.SetFixedSize(false)
 			win.SetPadded(false)
 
-			if app.Preferences().BoolWithFallback("fullscreen", true) {
+			if app.Preferences().BoolWithFallback("fullscreen", false) {
 				win.SetFullScreen(true)
 			} else {
 				win.SetFullScreen(false)
-				win.Resize(fyne.NewSize(900, 750))
+				win.Resize(fyne.NewSize(1200, 720))
 				win.CenterOnScreen()
 			}
 		})
-
 	}
 
 	signIn.OnTapped = doSignIn

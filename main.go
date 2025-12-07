@@ -8,6 +8,8 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
+const debugMainUI = false // for debug - true
+
 var Version = "dev"
 var Commit = "none"
 var Date = "unknown"
@@ -38,14 +40,31 @@ func (blackTextTheme) Size(name fyne.ThemeSizeName) float32 {
 }
 
 func main() {
-	myApp := app.NewWithID("TORII-DS")
+	myApp := app.NewWithID("Qalqan-DS")
 	myApp.Settings().SetTheme(&blackTextTheme{})
-	win := myApp.NewWindow("TORII-DS")
+	win := myApp.NewWindow("Qalqan-DS")
 	setWindowIcon(win)
 
-	ShowLogin(myApp, win)
-	win.Resize(fyne.NewSize(350, 250))
-	win.SetFixedSize(false)
-	win.CenterOnScreen()
+	if debugMainUI {
+		langPref := myApp.Preferences().String("lang")
+		if langPref == "" {
+			langPref = "EN"
+		}
+		currentLang = langPref
+
+		isCenterMode = false
+
+		InitMainUI(myApp, win)
+
+		win.SetFixedSize(false)
+		win.Resize(fyne.NewSize(1200, 720))
+		win.CenterOnScreen()
+	} else {
+		ShowLogin(myApp, win)
+		win.Resize(fyne.NewSize(350, 250))
+		win.SetFixedSize(false)
+		win.CenterOnScreen()
+	}
+
 	win.ShowAndRun()
 }
